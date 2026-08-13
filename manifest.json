@@ -1,0 +1,18 @@
+{
+  "name": "原子习惯 - Hyuna",
+  "short_name": "原子习惯",
+  "description": "基于马斯洛需求层次的个人计划与执行管理工具",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F8F9FE",
+  "theme_color": "#FF6B6B",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
