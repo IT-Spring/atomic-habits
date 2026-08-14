@@ -709,7 +709,12 @@ const Views = {
       `;
     };
 
-    el.innerHTML = summaryHTML + this._profileSections.map(section => `
+        const planLevels = (Store.data.plans && Store.data.plans.levels) || [];
+    const planCatCount = planLevels.reduce((s, l) => s + ((l.categories && l.categories.length) || 0), 0);
+    const linkHTML = planCatCount > 0
+      ? `<div class="card" style="border-left:4px solid var(--c-teal); background:#f0faf8"><div class="card-title">🔗 画像与计划的关联</div><div style="font-size:13px; line-height:1.6">你的个人画像已参与 <b>${planCatCount}</b> 个计划分类的 AI 建议。填好画像后，每次用「AI 计划助手」分类都会自动参考这些信息。</div></div>`
+      : `<div class="card" style="border-left:4px solid var(--c-yellow); background:#fffbea"><div style="font-size:13px">📌 你的画像将用于「AI 计划助手」的分类建议。完成首次计划分类后，这里会显示画像如何影响计划。</div></div>`;
+    el.innerHTML = summaryHTML + linkHTML + this._profileSections.map(section => `
       <div class="card">
         <div class="card-title">${section.title}</div>
         ${section.fields.map(f => renderField(f)).join('')}
@@ -3249,24 +3254,49 @@ const AIGuide = {
     },
   },
 
-  // === 动态提取目标 ===
+  // === 兜底提取目标（无 Key / AI 失败时）===
+  // 关键：本地兜底只能做"粗分组"，无法语义整体理解——所以这里只按换行/句末标点分块，
+  // 尊重用户用条目（换行/句号）表达的输入；逗号、顿号、分号不再拆分，避免一段话碎成几十条。
+  // 同时强制每层 ≤3、总数 ≤15，杜绝"237 个类"。真正的整体语义理解请填 DeepSeek Key 走 AI 路径。
   _extractGoals(inputs) {
-    const goals = [];
+    const raw = [];
     inputs.forEach(input => {
-      // 按标点分句
-      const phrases = input.split(/[，。、；\n,;.！？!?]/).map(p => p.trim()).filter(p => p.length > 1);
-      if (phrases.length === 0) phrases.push(input.trim());
-      phrases.forEach(phrase => {
+      // 优先按换行/句末分块（尊重用户条目化输入）；块内若含逗号且较长，再按逗号/顿号/分号拆成条目
+      // ——既不把整段当一个，也不逐词碎拆；最终受每层<=3、总数<=15 约束
+      const rawBlocks = input.split(/[\n。.!?！？]+/).map(b => b.trim()).filter(b => b.length > 2);
+      const blocks = [];
+      rawBlocks.forEach(b => {
+        if (/[，、；;]/.test(b) && b.length > 8) {
+          b.split(/[，、；;]+/).forEach(x => { const t = x.trim(); if (t.length > 2) blocks.push(t); });
+        } else {
+          blocks.push(b);
+        }
+      });
+      if (blocks.length === 0) blocks.push(input.trim());
+      blocks.forEach(block => {
         // 去掉常见前缀，提取核心动作
-        let action = phrase;
+        let action = block;
         action = action.replace(/^(我想|我要|我打算|我计划|我希望|准备|开始|坚持|努力|需要|应该|想|要|打算|计划|希望|一直|最近|今年|这个月|下周|明天|今天|开始|尝试|练习|学习|去|搞|弄)/g, '');
-        action = action.replace(/[的了着吧啊呢哦哈呀咯嘛]/g, '');
+        action = action.replace(/[了的着吧啊呢哦哈呀咯嘛]/g, '');
         action = action.trim();
-        if (action.length === 0) action = phrase;
-        goals.push({ original: phrase, action, levelId: '', categoryName: '' });
+        if (action.length === 0) action = block;
+        raw.push({ original: block, action, levelId: '', categoryName: '' });
       });
     });
-    return goals;
+
+    // 本地粗分组：按层级归类，每层最多 3 个，总数最多 15 个
+    const levelCount = {};
+    const out = [];
+    raw.forEach(g => {
+      const lid = this._matchLevel(g.action) || 'lvl-5';
+      levelCount[lid] = (levelCount[lid] || 0);
+      if (levelCount[lid] >= 3) return; // 每层上限 3
+      levelCount[lid]++;
+      g.levelId = lid;
+      g.categoryName = this._makeCategoryName(g.action, lid);
+      out.push(g);
+    });
+    return out.slice(0, 15);
   },
 
   // === 匹配 Maslow 层级 ===
@@ -3605,10 +3635,10 @@ ${fullText}
 4. 严禁把用户的一句话拆成多个碎片目标
 
 【分类规则】
-1. **提炼短句**——分类名 2-6 字概括（如"自媒体运营"、"减脂塑形"），禁止照搬原文
-2. **每层上限 3**——马斯洛 5 层，每层最多 3 个大类，总计最多 15 个
+1. **提炼短句**——categoryName 必须是从语义中提炼的 2-8 字短语/短句（如"自媒体运营"、"减脂塑形"），严禁把用户的长句原话直接当分类名；不得包含逗号、句号、分号等长句标点
+2. **总数硬上限 15**——马斯洛 5 层，每层最多 3 个大类，总计最多 15 个。若你初稿超过，必须主动合并语义相近项，绝不罗列
 3. **语义合并**——同一件事的不同表述合并为一个大类
-4. **联想补全**——如果用户整体意图中隐含某个方向但没明说，可主动给出 1-2 个相关大类（不要硬凑）
+4. **联想补全（提到用户想不到的点）**——基于马斯洛框架，主动补齐用户可能没想到但重要的方向（如用户只说"学德语"，可联想到"留学财务储备"、"作息适应"），每个联想大类要在 reason 里说明依据，不要硬凑
 5. **层级**：lvl-1 生理(饮食/睡眠/运动/作息) | lvl-2 安全(财务/工作/健康保障) | lvl-3 社交(家人/朋友/感情) | lvl-4 尊重(成就/技能/认可) | lvl-5 自我实现(学习/创造/创业/艺术)
 
 【自动细分小目标】
@@ -3656,6 +3686,13 @@ ${fullText}
           levelCount[lid] = (levelCount[lid] || 0) + 1;
           return levelCount[lid] <= 3;
         });
+        // ★ 硬约束：总数 <=15（每层<=3 已保证，再保险 AI 膨胀）
+        if (goals.length > 15) goals = goals.slice(0, 15);
+        // ★ categoryName 超长截断（防 AI 照搬原话长句当分类名）+ levelId 合法性校验
+        goals.forEach(g => {
+          if (!g.levelId || !String(g.levelId).startsWith('lvl-')) g.levelId = 'lvl-5';
+          if (g.categoryName && g.categoryName.length > 12) g.categoryName = g.categoryName.slice(0, 12);
+        });
       } catch (err) {
         Utils.toast('AI 分析失败，使用规则匹配: ' + err.message, 'warning');
         goals = this._extractGoals(s.userInputs);
@@ -3685,6 +3722,12 @@ ${fullText}
     goals.forEach((g, i) => { g.idx = i; if (!byLevel[g.levelId]) byLevel[g.levelId] = []; byLevel[g.levelId].push(g); });
 
     let itemsHTML = '';
+    const profInfo = Store.data.personalInfo || {};
+    const profKeys = Object.keys(profInfo).filter(k => profInfo[k] && profInfo[k] !== '不必要');
+    const profBanner = profKeys.length > 0
+      ? `<div class="card" style="margin:8px 0; border-left:3px solid var(--c-lavender); background:#f6f0ff"><div style="font-size:13px">🧬 <b>本次分类已参考你的个人画像</b>（共 ${profKeys.length} 项，如职业/健康/压力等），让推荐更贴合你。</div></div>`
+      : '';
+    itemsHTML = profBanner + itemsHTML;
     levelOrder.forEach(levelId => {
       if (!byLevel[levelId]) return;
       const count = byLevel[levelId].length;
