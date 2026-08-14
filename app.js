@@ -279,41 +279,57 @@ const Progress = {
     return tasks;
   },
 
-  // 今日任务完成进度
+  // 今日已关联的自定义登记（AI 归类并计入目标的那些）
+  _countsAsDoneToday() {
+    const today = Utils.todayStr();
+    const log = Store.data.dailyLogs[today];
+    if (!log || !log.activities) return [];
+    return log.activities.filter(a => a.countsAsDone && a.goalCatId);
+  },
+
+  // 今日任务完成进度（含 AI 归类的自定义登记）
   todayProgress() {
     const today = Utils.todayStr();
     const tasks = this.allTasks();
     const dailyTasks = tasks.filter(t => t.taskType === 'daily' || t.taskType === 'weekly');
+    const cadDone = this._countsAsDoneToday();
     if (dailyTasks.length === 0) {
-      // 没有日常任务，用今日活动记录计算
-      const log = Store.data.dailyLogs[today];
-      const count = log && log.activities ? log.activities.length : 0;
-      return { percent: Math.min(100, count * 20), done: 0, total: 0, hasDaily: false, activityCount: count };
+      const count = cadDone.length;
+      return { percent: Math.min(100, count * 20), done: count, total: count, hasDaily: false, activityCount: count };
     }
-    const done = dailyTasks.filter(t => t.dailyCompleted && t.dailyCompleted[today]).length;
-    return { percent: Math.round(done / dailyTasks.length * 100), done, total: dailyTasks.length, hasDaily: true };
+    const done = dailyTasks.filter(t => t.dailyCompleted && t.dailyCompleted[today]).length + cadDone.length;
+    const total = dailyTasks.length + cadDone.length;
+    return { percent: Math.min(100, Math.round(done / total * 100)), done, total, hasDaily: true };
   },
 
-  // 今日分类进度（按活动类型分组）
+  // 今日分类进度（按活动类型 / 已归类目标分组）
   todayCategoryProgress() {
     const today = Utils.todayStr();
     const log = Store.data.dailyLogs[today];
     const activities = (log && log.activities) ? log.activities : [];
     const tasks = this.allTasks();
-    
-    // 按活动类型统计
+    const dailyTasks = tasks.filter(t => t.taskType === 'daily' || t.taskType === 'weekly');
+
+    // 目标大类 id -> 名称
+    const catNameById = {};
+    (Store.data.plans.levels || []).forEach(l => (l.categories || []).forEach(c => catNameById[c.id] = c.name));
+
+    // 按活动类型 / 已归类目标分组
     const cats = {};
     activities.forEach(a => {
-      const key = this._activityToCategory(a.type);
-      if (!cats[key]) cats[key] = { count: 0, label: this._categoryLabel(key) };
+      let key, label;
+      if (a.countsAsDone && a.goalCatId && catNameById[a.goalCatId]) {
+        key = a.goalCatId; label = catNameById[a.goalCatId];
+      } else {
+        key = this._activityToCategory(a.type); label = this._categoryLabel(key);
+      }
+      if (!cats[key]) cats[key] = { count: 0, label };
       cats[key].count++;
     });
 
-    // 统计每个分类的任务完成情况
-    const dailyTasks = tasks.filter(t => t.taskType === 'daily' || t.taskType === 'weekly');
     const result = [];
     for (const [key, val] of Object.entries(cats)) {
-      const catTasks = dailyTasks.filter(t => this._taskMatchesCategory(t, key));
+      const catTasks = dailyTasks.filter(t => this._taskMatchesCategory(t, val.label) || t.goalCatId === key);
       const catDone = catTasks.filter(t => t.dailyCompleted && t.dailyCompleted[today]).length;
       const percent = catTasks.length > 0 ? Math.round(catDone / catTasks.length * 100) : Math.min(100, val.count * 25);
       result.push({ key, label: val.label, count: val.count, taskDone: catDone, taskTotal: catTasks.length, percent });
@@ -345,6 +361,7 @@ const Progress = {
 
   // 长期目标进度（每个大类一个进度条）
   longtermGoals() {
+    const cadToday = this._countsAsDoneToday();
     const goals = [];
     Store.data.plans.levels.forEach(lvl => {
       (lvl.categories || []).forEach(cat => {
@@ -363,11 +380,14 @@ const Progress = {
             }
           });
         });
-        const percent = totalTasks > 0 ? Math.round(totalProgress / totalTasks) : 0;
+        let percent = totalTasks > 0 ? Math.round(totalProgress / totalTasks) : 0;
+        // 今日自定义的「已归类登记」计入该目标进度（每条 +5%，封顶 100）
+        const cad = cadToday.filter(a => a.goalCatId === cat.id).length;
+        percent = Math.min(100, percent + cad * 5);
         goals.push({
           lvlId: lvl.id, lvlName: lvl.name, lvlIcon: lvl.icon, lvlColor: lvl.color,
           catId: cat.id, catName: cat.name, catNotes: cat.userNotes || '',
-          percent, taskCount: totalTasks,
+          percent, taskCount: totalTasks, todayDone: cad,
         });
       });
     });
@@ -420,31 +440,45 @@ const Views = {
     const todaySpend = Companion.getTodaySpending();
     const hasChar = Companion.hasCharacter();
 
-    let levelsHTML = '';
-    Store.data.plans.levels.forEach(lvl => {
-      const p = Progress.level(lvl);
-      levelsHTML += `
-        <div class="card" style="border-left:4px solid ${lvl.color}">
-          <div class="flex items-center justify-between mb-2">
-            <span class="font-bold text-sm">${lvl.icon} ${lvl.name}</span>
-            <span class="progress-percent">${p}%</span>
+    const todayInfo = Progress.todayProgress();
+    const catProg = Progress.todayCategoryProgress();
+    let catHTML = '';
+    if (catProg.length > 0) {
+      catHTML = catProg.map(c => `
+        <div style="margin-bottom:10px">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-sm">${Utils.escape(c.label)}</span>
+            <span class="text-xs text-light">${c.percent}%</span>
           </div>
-          ${Progress.progressBar(p)}
+          ${Progress.progressBar(c.percent)}
         </div>
-      `;
-    });
+      `).join('');
+    }
+    const longTerm = Progress.longtermGoals();
+    let goalsHTML = '';
+    if (longTerm.length > 0) {
+      goalsHTML = longTerm.map(g => `
+        <div class="card" style="border-left:4px solid ${g.lvlColor}">
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-bold text-sm">${g.lvlIcon} ${Utils.escape(g.catName)}</span>
+            <span class="progress-percent">${g.percent}%</span>
+          </div>
+          ${Progress.progressBar(g.percent)}
+          ${g.todayDone ? '<div class="text-xs text-light mt-1">今日已登记 ' + g.todayDone + ' 项 ✅</div>' : ''}
+        </div>
+      `).join('');
+    }
 
     el.innerHTML = `
       <div class="dashboard-greeting">${greeting}，${Utils.escape(name)} 👋</div>
       <div class="dashboard-subtitle">${Utils.formatDate(new Date().toISOString())}</div>
 
       <div class="card" style="background:linear-gradient(135deg, #FF6B6B, #FF8FAB); color:#fff">
-        <div class="text-sm" style="opacity:0.85; margin-bottom:4px">总体计划进度</div>
-        <div style="font-size:36px; font-weight:800; line-height:1.2">${totalProgress}<span style="font-size:18px">%</span></div>
-        <div style="margin-top:8px">${Progress.progressBar(totalProgress, true)}</div>
+        <div class="text-sm" style="opacity:0.85; margin-bottom:4px">今日进度</div>
+        <div style="font-size:36px; font-weight:800; line-height:1.2">${todayInfo.percent}<span style="font-size:18px">%</span></div>
+        <div style="margin-top:8px">${Progress.progressBar(todayInfo.percent, true)}</div>
         <div class="flex gap-3 mt-3" style="font-size:12px; opacity:0.85">
-          <span>📌 ${taskCount} 个任务</span>
-          <span>🌿 ${confirmedBranches} 个确认分支</span>
+          <span>✅ 今日完成 ${todayInfo.done}/${todayInfo.total}</span>
           <span>📝 今日${todayActivities}条记录</span>
         </div>
       </div>
@@ -495,8 +529,13 @@ const Views = {
       `}
 
       <div class="card">
-        <div class="card-title">📊 各层级进度</div>
-        ${levelsHTML || '<div class="empty-state"><div class="empty-state-icon">🌱</div><div class="empty-state-text">还没有计划，去「计划」页创建吧</div></div>'}
+        <div class="card-title">📊 今日分类进度</div>
+        ${catHTML || '<div class="empty-state-text">今天还没有登记记录</div>'}
+      </div>
+
+      <div class="card">
+        <div class="card-title">🎯 长期目标进度</div>
+        ${goalsHTML || '<div class="empty-state-text">去「计划」页创建目标吧</div>'}
       </div>
 
       ${todayActivities > 0 ? `
@@ -1064,6 +1103,12 @@ const Views = {
           <div class="flex gap-2 mt-2 flex-wrap">
             <span class="text-sm text-light">${recordCount}条记录${stateCount > 0 ? ` · ${stateCount}条状态` : ''}</span>
           </div>
+          <div class="flex gap-2 mt-2 flex-wrap" style="align-items:center">
+            <span class="text-xs text-light">类型</span>
+            <select class="form-input" style="width:auto; padding:4px 8px; font-size:12px" onchange="Views.setTaskType('${lvl.id}','${cat.id}','${br.id}','${task.id}', this.value)">
+              ${['daily','weekly','longterm','oneoff'].map(tp => `<option value="${tp}" ${(task.taskType||'longterm') === tp ? 'selected' : ''}>${tp==='daily'?'每日':tp==='weekly'?'每周':tp==='longterm'?'长期':'单次'}</option>`).join('')}
+            </select>
+          </div>
           <div class="flex gap-2 mt-2 flex-wrap">
             <button class="btn btn-secondary btn-sm" onclick="Views.recordProgress('${lvl.id}','${cat.id}','${br.id}','${task.id}')">📈 记录</button>
             <button class="btn btn-secondary btn-sm" onclick="AIGuide.recordState('${lvl.id}','${cat.id}','${br.id}','${task.id}','before')">🏃 开始前</button>
@@ -1074,6 +1119,17 @@ const Views = {
         </div>
       </div>
     `;
+  },
+
+  setTaskType(lvlId, catId, brId, taskId, type) {
+    const task = this._getTask(lvlId, catId, brId, taskId);
+    if (!task) return;
+    task.taskType = type;
+    Store.recordVersion('设置任务类型', `${task.name} → ${type}`);
+    Store.save();
+    const label = type === 'daily' ? '每日' : type === 'weekly' ? '每周' : type === 'longterm' ? '长期' : '单次';
+    Utils.toast('已设为「' + label + '」', 'success');
+    Router.render();
   },
 
   _renderVersionHistory() {
@@ -1799,33 +1855,21 @@ const Views = {
       if (typing) typing.style.display = 'none';
 
       if (result) {
-        // 重新获取 chat 元素
-        chat = document.getElementById('companion-chat');
-        if (chat) {
-          const botBubble = document.createElement('div');
-          botBubble.innerHTML = this._renderChatBubble({ role: 'assistant', content: result.reply, time: new Date().toISOString() }, Store.data.aiCharacter);
-          chat.appendChild(botBubble.firstElementChild);
-
-          // 渲染动作结果
-          if (result.actionResults && result.actionResults.length > 0) {
+        // 统一从聊天历史重渲染：历史是唯一真相源，避免手动 append 的 bubble
+        // 被后续 Router.render（如动作触发）冲掉导致「回复不弹出」
+        this._refreshCompanionStats();
+        // 动作结果提示（重渲染后追加，短暂展示）
+        if (result.actionResults && result.actionResults.length > 0) {
+          const chat2 = document.getElementById('companion-chat');
+          if (chat2) {
             for (const a of result.actionResults) {
               const actionEl = document.createElement('div');
               actionEl.className = 'chat-action-notice';
               actionEl.innerHTML = `<span>${a.icon}</span> ${Utils.escape(a.text)}`;
-              chat.appendChild(actionEl);
+              chat2.appendChild(actionEl);
             }
+            this._scrollChatToBottom();
           }
-
-          this._scrollChatToBottom();
-        }
-
-        // 如果有记账/活动动作，刷新统计
-        if (result.actionResults && result.actionResults.length > 0) {
-          setTimeout(() => {
-            if (Router.current === 'companion') {
-              this._refreshCompanionStats();
-            }
-          }, 2000);
         }
       }
     } catch (err) {
@@ -2139,6 +2183,31 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
     if (btn) { btn.disabled = false; btn.textContent = '🤖 AI帮我规划'; }
   },
 
+  // AI 语义归类：把用户自定义登记文本归到最贴合的计划大类（需 DeepSeek Key）
+  async classifyActivity(text) {
+    if (!AIClient.hasKey()) return null;
+    const levels = Store.data.plans.levels || [];
+    if (levels.length === 0) return null;
+    const summary = levels.map(l => ({
+      lvlId: l.id, lvlName: l.name,
+      categories: (l.categories || []).map(c => ({ catId: c.id, catName: c.name, notes: c.userNotes || '' }))
+    }));
+    const prompt = `你是一个计划分类助手。以下是用户的计划体系（马斯洛五层，每层含若干大类）：\n${JSON.stringify(summary, null, 2)}\n\n用户刚登记了一条自定义活动："${text}"。\n请判断这条活动最贴合上述哪个大类（category）。\n严格只输出一个 JSON 对象，格式：{"lvlId":"层id","catId":"类id","reason":"一句话依据"}。\n若无法匹配任何已有大类，输出 {"lvlId":null,"catId":null,"reason":"未匹配"}。`;
+    try {
+      const raw = await AIClient.callChat([{ role: 'user', content: prompt }], { system: '你是计划分类助手，严格只输出JSON，不要任何解释文字。', temperature: 0.3, maxTokens: 200 });
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (!m) return null;
+      const obj = JSON.parse(m[0]);
+      if (!obj.catId) return null;
+      const lvl = levels.find(l => l.id === obj.lvlId);
+      const cat = lvl && (lvl.categories || []).find(c => c.id === obj.catId);
+      if (!cat) return null;
+      return { lvlId: obj.lvlId, catId: obj.catId, catName: cat.name, reason: obj.reason || '' };
+    } catch (e) {
+      return null;
+    }
+  },
+
   quickLog(type) {
     const today = Utils.todayStr();
     if (!Store.data.dailyLogs[today]) Store.data.dailyLogs[today] = { activities: [] };
@@ -2209,7 +2278,7 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
     }
   },
 
-  _confirmQuickLog(type) {
+  async _confirmQuickLog(type) {
     const desc = document.getElementById('custom-desc').value.trim();
     const today = Utils.todayStr();
     if (!Store.data.dailyLogs[today]) Store.data.dailyLogs[today] = { activities: [] };
@@ -2220,45 +2289,60 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
     const isPeriod = periodGroup && !periodGroup.classList.contains('hidden');
     const labels = { sleep:'睡觉', wake:'起床', meal:'用餐', work:'工作', rest:'休息', exercise:'运动', study:'学习', plan:'计划', custom:'其他' };
 
+    // 先抓取时间/描述，避免 closeModal 后 DOM 失效
+    let timeVal = '', startVal = '', endVal = '';
     if (isPeriod) {
-      const startTime = document.getElementById('custom-time-start').value;
-      const endTime = document.getElementById('custom-time-end').value;
-      const [sh, sm] = startTime.split(':').map(Number);
-      const [eh, em] = endTime.split(':').map(Number);
-      let mins = (eh * 60 + em) - (sh * 60 + sm);
-      if (mins < 0) mins += 24 * 60;
-      log.activities.push({
-        type,
-        mode: 'period',
-        time: `${startTime}~${endTime}`,
-        startTime,
-        endTime,
-        duration: mins,
-        desc,
-      });
+      startVal = document.getElementById('custom-time-start').value;
+      endVal = document.getElementById('custom-time-end').value;
+      timeVal = startVal + '~' + endVal;
     } else {
-      const time = document.getElementById('custom-time').value;
-      log.activities.push({
-        type,
-        mode: 'point',
-        time,
-        desc,
-      });
+      timeVal = document.getElementById('custom-time').value;
+    }
+
+    let activity;
+    if (isPeriod) {
+      const [sh, sm] = startVal.split(':').map(Number);
+      const [eh, em2] = endVal.split(':').map(Number);
+      let mins = (eh2 * 60 + em2) - (sh * 60 + sm);
+      if (mins < 0) mins += 24 * 60;
+      activity = { type, mode: 'period', time: timeVal, startTime: startVal, endTime: endVal, duration: mins, desc };
+    } else {
+      activity = { type, mode: 'point', time: timeVal, desc };
+    }
+    log.activities.push(activity);
+
+    // 自定义登记：有 Key -> AI 语义归类并计入对应目标进度；无 Key -> 仅记录并提示
+    if (type === 'custom') {
+      if (AIClient.hasKey()) {
+        const cls = await this.classifyActivity(desc || '自定义活动');
+        if (cls) {
+          activity.goalLvlId = cls.lvlId;
+          activity.goalCatId = cls.catId;
+          activity.countsAsDone = true;
+          activity.goalReason = cls.reason;
+          Utils.toast('已归类到「' + cls.catName + '」并计入进度 🎯', 'success');
+        } else {
+          Utils.toast('已记录（未匹配到合适目标，可去计划页手动关联）', 'success');
+        }
+      } else {
+        Utils.toast('已记录（未配置 Key：自定义登记暂未计入进度。去设置填 DeepSeek Key 后可自动归类）', 'info');
+      }
     }
 
     Store.save();
     Utils.closeModal();
-    Utils.toast('已记录', 'success');
 
     if (Companion.hasCharacter() && AIClient.hasKey()) {
       const activityDesc = isPeriod
-        ? `（快捷记录）${labels[type] || type}，${document.getElementById('custom-time-start').value}到${document.getElementById('custom-time-end').value}${desc ? '，'+desc : ''}`
-        : `（快捷记录）${labels[type] || type}${desc ? '，'+desc : ''}`;
+        ? '（快捷记录）' + (labels[type] || type) + '，' + startVal + '到' + endVal + (desc ? '，' + desc : '')
+        : '（快捷记录）' + (labels[type] || type) + (desc ? '，' + desc : '');
       Views._notifyCompanion(activityDesc);
     } else {
       Router.render();
     }
   },
+
+
 
   async _notifyCompanion(msg) {
     const char = Store.data.aiCharacter;
