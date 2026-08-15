@@ -59,6 +59,8 @@ const Store = {
         userPersona: '',    // 用户在世界观里的人设
         characterDesc: '',  // 角色介绍
         chatHistory: [],    // {role:'user'|'assistant', content, time}
+        dailyFocus: { date: '', asked: false, collected: false, items: [], muted: false }, // 今日重点
+        prefs: { tone: 'encouraging', pace: 'normal', quietHours: '', custom: '' }, // 陪伴偏好
       },
       versionHistory: [],
       sopTemplates: [],
@@ -112,8 +114,10 @@ const Store = {
     if (!this.data.accounting.records) this.data.accounting.records = [];
     if (!this.data.accounting.categories) this.data.accounting.categories = { expense: ['餐饮','交通','购物','娱乐','居住','医疗','教育','人情','其他'], income: ['工资','奖金','兼职','投资','红包','其他'] };
     // aiCharacter 迁移
-    if (!this.data.aiCharacter) this.data.aiCharacter = { name: '', avatar: '🤖', userNickname: '', aiNickname: '', relationship: '', worldview: '', userPersona: '', characterDesc: '', chatHistory: [] };
+    if (!this.data.aiCharacter) this.data.aiCharacter = { name: '', avatar: '🤖', userNickname: '', aiNickname: '', relationship: '', worldview: '', userPersona: '', characterDesc: '', chatHistory: [], dailyFocus: { date: '', asked: false, collected: false, items: [], muted: false }, prefs: { tone: 'encouraging', pace: 'normal', quietHours: '', custom: '' } };
     if (!this.data.aiCharacter.chatHistory) this.data.aiCharacter.chatHistory = [];
+    if (!this.data.aiCharacter.dailyFocus) this.data.aiCharacter.dailyFocus = { date: '', asked: false, collected: false, items: [], muted: false };
+    if (!this.data.aiCharacter.prefs) this.data.aiCharacter.prefs = { tone: 'encouraging', pace: 'normal', quietHours: '', custom: '' };
   },
 
   recordVersion(action, detail) {
@@ -1691,6 +1695,9 @@ const Views = {
       return;
     }
 
+    // 进入页面时，若今天还没问过「今日重点」，先抛提问（写入历史，重渲染不会重复）
+    Companion.maybeAskFocus();
+
     // 聊天历史
     const history = char.chatHistory || [];
     const chatHTML = history.length === 0 ? `
@@ -1726,6 +1733,18 @@ const Views = {
           <div class="companion-fin-val" style="color:${todaySpend.net >= 0 ? 'var(--c-teal)' : 'var(--c-coral)'}" data-type="net">${todaySpend.net >= 0 ? '+' : ''}${todaySpend.net}</div>
           <div class="companion-fin-label">净额</div>
         </div>
+      </div>
+
+      <!-- 今日重点 -->
+      <div class="card mt-2">
+        <div class="card-title">🎯 今日重点</div>
+        ${this._focusCardHTML(char)}
+      </div>
+
+      <!-- 陪伴偏好 -->
+      <div class="card mt-2">
+        <div class="card-title">⚙️ 陪伴偏好</div>
+        ${this._prefsCardHTML(char)}
       </div>
 
       <!-- 聊天区 -->
@@ -1826,6 +1845,62 @@ const Views = {
         </div>
       `;
     }
+  },
+
+  _focusCardHTML(char) {
+    const f = char.dailyFocus || {};
+    const today = Utils.todayStr();
+    if (!f.date || f.date !== today || !f.collected || !f.items || f.items.length === 0) {
+      if (f.muted && f.date === today) return `<div class="text-sm text-light">今天已设为安静模式，不主动盯重点。</div>`;
+      return `<div class="text-sm text-light">还没设定，在下面聊聊「今天想搞定什么」即可。</div>`;
+    }
+    return `<div>${f.items.map((x, i) => `<div class="focus-item">${i + 1}. ${Utils.escape(x)}</div>`).join('')}</div>`
+      + (f.muted ? `<div class="text-xs text-light mt-1">（已静音，将不再主动追问）</div>` : '');
+  },
+
+  _prefsCardHTML(char) {
+    const p = char.prefs || { tone: 'encouraging', pace: 'normal', quietHours: '', custom: '' };
+    const toneOpt = (v, l) => `<option value="${v}" ${p.tone === v ? 'selected' : ''}>${l}</option>`;
+    const paceOpt = (v, l) => `<option value="${v}" ${p.pace === v ? 'selected' : ''}>${l}</option>`;
+    return `
+      <div class="form-group">
+        <label class="form-label">语气</label>
+        <select class="form-input" id="pref-tone">
+          ${toneOpt('encouraging', '鼓励打气')}${toneOpt('casual', '轻松随意')}${toneOpt('strict', '直接严格')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">节奏</label>
+        <select class="form-input" id="pref-pace">
+          ${paceOpt('normal', '正常')}${paceOpt('frequent', '多聊多提醒')}${paceOpt('quiet', '保持安静')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">勿扰时段（如 14:00-16:00，可选）</label>
+        <input class="form-input" id="pref-quiet" value="${Utils.escape(p.quietHours || '')}" placeholder="14:00-16:00">
+      </div>
+      <div class="form-group">
+        <label class="form-label">特别说明（可选）</label>
+        <input class="form-input" id="pref-custom" value="${Utils.escape(p.custom || '')}" placeholder="比如：下午效率低别催">
+      </div>
+      <button class="btn btn-primary btn-block btn-sm" onclick="Views.saveCompanionPrefs()">保存偏好</button>
+    `;
+  },
+
+  async saveCompanionPrefs() {
+    const tone = document.getElementById('pref-tone');
+    const pace = document.getElementById('pref-pace');
+    const quiet = document.getElementById('pref-quiet');
+    const custom = document.getElementById('pref-custom');
+    if (!tone || !pace) return;
+    Companion.setPrefs({
+      tone: tone.value,
+      pace: pace.value,
+      quietHours: quiet ? quiet.value.trim() : '',
+      custom: custom ? custom.value.trim() : '',
+    });
+    Utils.toast('陪伴偏好已保存', 'success');
+    this._refreshCompanionStats();
   },
 
   _scrollChatToBottom() {
@@ -5282,6 +5357,108 @@ const Companion = {
     return found;
   },
 
+  /* --- 今日重点（Daily Focus）--- */
+  // 进入 Companion 页面时调用：若今天尚未问过，先抛一条「今日重点」提问
+  maybeAskFocus() {
+    const char = Store.data.aiCharacter;
+    const today = Utils.todayStr();
+    if (!char.dailyFocus || char.dailyFocus.date !== today) {
+      char.dailyFocus = { date: today, asked: false, collected: false, items: [], muted: false };
+    }
+    const f = char.dailyFocus;
+    if (!f.asked && !f.muted) {
+      f.asked = true;
+      char.chatHistory.push({
+        role: 'assistant',
+        content: '今天最想搞定的 1-3 件事是？比如「高数复习 背单词 跑步」，直接发给我就行～（想跳过就回「跳过」）',
+        time: new Date().toISOString(),
+      });
+      Store.save();
+    }
+  },
+
+  // 解析用户发来的重点条目（本地规则，离线可用）：按换行/顿号/逗号/分号拆分，最多 3 条
+  parseFocusItems(msg) {
+    if (!msg) return [];
+    let s = msg.trim();
+    // 去掉常见前缀
+    s = s.replace(/^(我想搞定|我想|我想要|我要搞定|我要|今日|今天|我的重点|重点|帮我盯|搞定)/, '');
+    const parts = s.split(/[\s、，,；;。.]+/).map(x => x.trim()).filter(Boolean);
+    // 去掉像「跳过」「没有」「无」这类
+    const skipWords = ['跳过', '没有', '无', '算了', '先不', '不用', '不需要', '没有重点', '没什么'];
+    const items = parts.filter(p => !skipWords.includes(p) && p.length <= 30);
+    return items.slice(0, 3);
+  },
+
+  // 采集模式下，从计划体系兜底取未完成任务名作为重点
+  _collectFromPlans() {
+    const items = [];
+    (Store.data.plans.levels || []).forEach(lvl => {
+      (lvl.categories || []).forEach(cat => {
+        (cat.branches || []).forEach(br => {
+          (br.tasks || []).forEach(t => {
+            if ((t.progress || 0) < 100 && items.length < 3) items.push(t.name);
+          });
+        });
+      });
+    });
+    return items;
+  },
+
+  // 是否「跳过」意图（在采集重点时）
+  _isSkipIntent(msg) {
+    return /^(跳过|算了|先不|不用|不需要|没有重点|没什么|没有|暂时不|先不说了)$/.test(msg.trim()) || /(跳过|算了|先不|不用管|暂时不)/.test(msg);
+  },
+
+  // 是否「退出/安静」意图（让用户别再追问/推送）
+  _isMuteIntent(msg) {
+    return /(别问了|不用管|别催了|别说了|安静点|安静|别烦|别打扰|退出|不用了|不用推|别推|让我自己|别管我|shut)/.test(msg);
+  },
+
+  // 在 Companion.send 里拦截：处理「今日重点采集」与「退出/安静」意图（离线可用，不调 AI）
+  _tryHandleFocusOrMute(message) {
+    const char = Store.data.aiCharacter;
+    const f = char.dailyFocus;
+    const today = Utils.todayStr();
+    if (!f || f.date !== today) return null;
+
+    // 采集模式
+    if (f.asked && !f.collected) {
+      if (this._isMuteIntent(message)) {
+        f.collected = true; f.muted = true; Store.save();
+        return { reply: '好，那我先不盯了，需要时随时叫我 🤫' };
+      }
+      if (this._isSkipIntent(message)) {
+        const fallback = this._collectFromPlans();
+        f.collected = true; f.items = fallback; Store.save();
+        return {
+          reply: fallback.length
+            ? `行，那我按你现有的计划来盯：${fallback.map((x, i) => `${i + 1}. ${x}`).join(' ')}`
+            : '好，那我先不设定具体目标，你随时找我～',
+        };
+      }
+      const items = this.parseFocusItems(message);
+      if (items.length === 0) {
+        return { reply: '没太 get 到重点～直接发我就行，比如「高数复习 背单词 跑步」，或者回「跳过」' };
+      }
+      f.collected = true; f.items = items; Store.save();
+      return { reply: `收到！今天我帮你盯紧：\n${items.map((x, i) => `${i + 1}. ${x}`).join('\n')}` };
+    }
+
+    // 退出 / 安静意图（非采集）
+    if (this._isMuteIntent(message)) {
+      f.muted = true; Store.save();
+      return { reply: '好，我安静啦 🤫 需要时随时叫我。' };
+    }
+    return null;
+  },
+
+  setPrefs(prefs) {
+    const char = Store.data.aiCharacter;
+    char.prefs = Object.assign(char.prefs || { tone: 'encouraging', pace: 'normal', quietHours: '', custom: '' }, prefs);
+    Store.save();
+  },
+
   /* --- 构建 system prompt --- */
   buildSystemPrompt() {
     const char = Store.data.aiCharacter;
@@ -5393,6 +5570,34 @@ const Companion = {
       p += `【重点监督】以上标 ○ 的任务尚未完成，共${incompleteTasks.length}个。在聊天中自然地关心这些任务的进度。\n\n`;
     }
 
+    // === 今日重点（Daily Focus）：优先围绕它聚焦监督，而非泛泛谈所有计划 ===
+    const f = char.dailyFocus;
+    const todayStr = Utils.todayStr();
+    if (f && f.date === todayStr && f.collected && f.items && f.items.length > 0) {
+      p += `【今日重点】（今天用户最想搞定的事，请优先围绕这些聚焦监督与提醒，而不是泛泛谈所有计划）\n`;
+      p += f.items.map((x, i) => `${i + 1}. ${x}`).join('\n') + '\n\n';
+    } else if (f && f.date === todayStr && !f.collected && !f.muted) {
+      p += `【今日重点】用户今天还没告诉我今日重点，请自然地先问一下今天最想搞定什么（1-3件事）。\n\n`;
+    }
+
+    // === 用户偏好的陪伴方式 ===
+    const prefs = char.prefs;
+    if (prefs) {
+      const toneMap = { encouraging: '鼓励为主，多肯定、多打气', casual: '轻松随意，像朋友闲聊', strict: '直接严格，少寒暄、直奔重点' };
+      const paceMap = { normal: '正常节奏，时不时说一句即可', frequent: '可以多主动聊、多提醒、多关心', quiet: '保持安静，只在用户主动说话时才回应' };
+      p += `【用户偏好的陪伴方式】（请严格遵守）\n`;
+      p += `- 语气：${toneMap[prefs.tone] || '鼓励为主'}\n`;
+      p += `- 节奏：${paceMap[prefs.pace] || '正常节奏'}\n`;
+      if (prefs.quietHours && prefs.quietHours.trim()) p += `- 勿扰时段：${prefs.quietHours.trim()} 之间不要主动发起新话题或追问\n`;
+      if (prefs.custom && prefs.custom.trim()) p += `- 用户特别说明：${prefs.custom.trim()}\n`;
+      p += '\n';
+    }
+
+    // === 安静模式 ===
+    if (f && f.date === todayStr && f.muted) {
+      p += `【安静模式】用户今天说了「别问了/退出/安静」，请只回应用户主动说的话，不要主动提议新任务、不要追问、不要提醒。保持简短。\n\n`;
+    }
+
     // === 当前执行任务 ===
     if (ExecGuide.currentTask) {
       const ct = ExecGuide.currentTask;
@@ -5458,6 +5663,20 @@ actions 是要执行的动作数组，可为空。每个动作格式：
       content: message,
       time: new Date().toISOString(),
     });
+
+    // 今日重点采集 / 退出·安静意图：本地拦截，离线可用，不调 AI
+    const focusHandled = this._tryHandleFocusOrMute(message);
+    if (focusHandled) {
+      char.chatHistory.push({
+        role: 'assistant',
+        content: focusHandled.reply,
+        time: new Date().toISOString(),
+      });
+      if (char.chatHistory.length > 200) char.chatHistory = char.chatHistory.slice(-200);
+      Store.save();
+      this.sending = false;
+      return { reply: focusHandled.reply, actionResults: [] };
+    }
 
     // 构建对话消息（保留最近 20 条）
     const recentHistory = char.chatHistory.slice(-20);
