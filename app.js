@@ -956,6 +956,14 @@ const Views = {
       Store.save();
     }
     Utils.toast('保存成功！', 'success');
+
+    // 录入/更新个人信息后，自动让 AI 基于新画像在现有计划上做增量调整（需 API；弹预览需确认）
+    const planExists = Store.data.plans.levels.some(l => l.categories.length > 0);
+    const profileHasContent = AIGuide._buildProfileSummary(true).trim().length > 0;
+    if (AIClient.hasKey() && planExists && profileHasContent && oldInfo !== newInfo) {
+      AIGuide.autoUpdateFromProfile();
+    }
+
     Router.navigate('dashboard');
   },
 
@@ -4174,6 +4182,68 @@ ${text}
       Utils.toast('AI 更新失败：' + err.message, 'error');
       s.stage = 'input';
       this._renderUpdateModal();
+    }
+  },
+
+  // 录入/更新个人信息后，自动让 AI 基于最新画像在现有计划上做增量调整（弹预览，需确认才落地）
+  async autoUpdateFromProfile() {
+    const hasPlan = Store.data.plans.levels.some(l => l.categories.length > 0);
+    if (!hasPlan) return;
+    if (!AIClient.hasKey()) return;
+    this.updateState = { chatHistory: [], request: '', stage: 'thinking', returned: null, diff: null };
+    this._renderUpdateModal();
+    try {
+      const profile = this._buildProfileSummary(true);
+      const planText = this._serializePlan();
+      const text = `用户刚刚更新了个人信息，最新个人画像如下：\n${profile}\n\n请基于这份最新个人信息，判断现有计划是否需要调整——例如新增更贴合当前状态的目标或分支、调整已不合适的内容。只做必要的最小改动，未提及的分类保持不变。`;
+      const prompt = `你是一个基于马斯洛需求层次理论的个人计划助手，任务是<b>在用户已有计划的基础上做增量更新</b>，绝不能推倒重来。
+
+【用户个人画像摘要】
+${profile || '（未填写）'}
+
+【用户当前已有计划（这是必须保留的基础）】
+${planText}
+
+【用户的更新需求】
+"""
+${text}
+"""
+
+【你的任务】
+根据用户需求，对上面的计划做<b>最小必要改动</b>，返回更新后的<b>完整计划清单</b>（JSON 数组）。规则：
+1. <b>保留所有用户没要求改/删的分类</b>，原样保留它们的 id、名称和层级，绝对不要遗漏或丢掉。
+2. 用户要求<b>新增</b>的分类：id 设为空字符串 ""，并给出 3-5 个 subTasks（具体可执行的小目标）。
+3. 用户要求<b>删除</b>的分类：直接从数组里去掉（不要返回它）。
+4. 用户要求<b>修改</b>的分类（改名/换层级）：必须保留其原有 id，只改 categoryName 或 levelId（改名时 id 绝不能丢）。
+5. 每个分类返回字段：{"id":"原有id或空串","levelId":"lvl-x","categoryName":"2-8字短句","reason":"为什么这样改/加","subTasks":["小目标1","小目标2",...]}
+6. 总数仍 ≤15，每层 ≤3；层级：lvl-1 生理 | lvl-2 安全 | lvl-3 社交 | lvl-4 尊重 | lvl-5 自我实现。
+
+【严格 JSON 格式】
+[
+  {"id":"...","levelId":"lvl-x","categoryName":"...","reason":"...","subTasks":[...]},
+  ...
+]`;
+      const result = await AIClient.callJSON(prompt, { temperature: 0.3 });
+      let list = Array.isArray(result) ? result : [];
+      list = list.filter(g => g && g.categoryName && String(g.categoryName).trim());
+      list = list.map(g => ({
+        id: (g.id && String(g.id).trim()) || '',
+        levelId: (g.levelId && String(g.levelId).startsWith('lvl-')) ? g.levelId : 'lvl-5',
+        categoryName: String(g.categoryName).trim().slice(0, 12),
+        reason: g.reason || '',
+        subTasks: Array.isArray(g.subTasks) ? g.subTasks.filter(t => t && String(t).trim()).map(t => String(t).trim()) : [],
+      }));
+      const levelCount = {};
+      list = list.filter(g => { const lid = g.levelId; levelCount[lid] = (levelCount[lid] || 0) + 1; return levelCount[lid] <= 3; });
+      if (list.length > 15) list = list.slice(0, 15);
+
+      this.updateState.returned = list;
+      this.updateState.diff = this._computeUpdateDiff(list);
+      this.updateState.stage = 'preview';
+      this._renderUpdateModal();
+    } catch (err) {
+      Utils.closeModal();
+      Utils.toast('AI 自动调整计划失败：' + (err.message || err), 'error');
     }
   },
 
