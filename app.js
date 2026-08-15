@@ -323,16 +323,25 @@ const Progress = {
       } else {
         key = this._activityToCategory(a.type); label = this._categoryLabel(key);
       }
-      if (!cats[key]) cats[key] = { count: 0, label };
+      if (!cats[key]) cats[key] = { count: 0, label, items: [] };
       cats[key].count++;
+      const txt = [a.name, a.note].filter(Boolean).join(' · ') || label;
+      cats[key].items.push({ text: txt, done: !!(a.countsAsDone && a.goalCatId), goal: !!(a.countsAsDone && a.goalCatId) });
     });
 
     const result = [];
     for (const [key, val] of Object.entries(cats)) {
       const catTasks = dailyTasks.filter(t => this._taskMatchesCategory(t, val.label) || t.goalCatId === key);
       const catDone = catTasks.filter(t => t.dailyCompleted && t.dailyCompleted[today]).length;
-      const percent = catTasks.length > 0 ? Math.round(catDone / catTasks.length * 100) : Math.min(100, val.count * 25);
-      result.push({ key, label: val.label, count: val.count, taskDone: catDone, taskTotal: catTasks.length, percent });
+      let percent;
+      if (catTasks.length > 0) {
+        percent = Math.round(catDone / catTasks.length * 100);
+        const cadCount = (val.items || []).filter(it => it.goal).length;
+        percent = Math.min(100, percent + cadCount * 5); // AI 语义归类的登记推动进度条
+      } else {
+        percent = Math.min(100, val.count * 25);
+      }
+      result.push({ key, label: val.label, count: val.count, taskDone: catDone, taskTotal: catTasks.length, percent, items: val.items });
     }
     return result;
   },
@@ -451,6 +460,7 @@ const Views = {
             <span class="text-xs text-light">${c.percent}%</span>
           </div>
           ${Progress.progressBar(c.percent)}
+          ${(c.items || []).map(it => `<div class="text-xs text-light mt-1" style="padding-left:2px">${it.goal ? '✅' : '•'} ${Utils.escape(it.text)}</div>`).join('')}
         </div>
       `).join('');
     }
@@ -547,7 +557,7 @@ const Views = {
               <div class="log-info">
                 <div class="log-type">${this._activityLabel(a.type)}</div>
                 <div class="log-time">${a.time || ''}</div>
-                ${a.desc ? `<div class="log-desc">${Utils.escape(a.desc)}</div>` : ''}
+                ${(a.note || a.desc) ? `<div class="log-desc">${Utils.escape((a.note || a.desc))}</div>` : ''}
               </div>
             </div>
           `).join('')}
@@ -1642,7 +1652,7 @@ const Views = {
               <div class="log-info">
                 <div class="log-type">${this._activityLabel(a.type)}</div>
                 <div class="log-time">${a.mode === 'period' ? `${a.startTime||''}~${a.endTime||''} (${this._formatDuration(a.duration)})` : (a.time || '')}</div>
-                ${a.desc ? `<div class="log-desc">${Utils.escape(a.desc)}</div>` : ''}
+                ${(a.note || a.desc) ? `<div class="log-desc">${Utils.escape((a.note || a.desc))}</div>` : ''}
               </div>
               <button class="log-delete" onclick="Views.deleteActivity(${log.activities.length - 1 - i})">×</button>
             </div>
@@ -1777,7 +1787,7 @@ const Views = {
               <div class="log-info">
                 <div class="log-type">${this._activityLabel(a.type)}</div>
                 <div class="log-time">${a.time || ''}</div>
-                ${a.desc ? `<div class="log-desc">${Utils.escape(a.desc)}</div>` : ''}
+                ${(a.note || a.desc) ? `<div class="log-desc">${Utils.escape((a.note || a.desc))}</div>` : ''}
               </div>
               <button class="log-delete" onclick="Views.deleteActivity(${log.activities.length - 1 - i})">×</button>
             </div>
@@ -2156,7 +2166,7 @@ const Views = {
     const todayLog = Store.data.dailyLogs[today] || {};
     const doneActivities = (todayLog.activities || []).map(a => {
       const label = this._activityLabel(a.type);
-      return `- ${a.time} ${label}${a.desc ? '：'+a.desc : ''}`;
+      return `- ${a.time} ${label}${(a.note || a.desc) ? '：'+(a.note || a.desc) : ''}`;
     }).join('\n');
 
     const prompt = `现在是${hour}点。以下是用户未完成的任务：
@@ -2221,12 +2231,31 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
     const timeStr = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
     const labels = { sleep:'😴 睡觉', wake:'☀️ 起床', meal:'🍽️ 用餐', work:'💼 工作', rest:'☕ 休息', exercise:'🏃 运动', study:'📚 学习', custom:'✏️ 自定义' };
     const title = labels[type] || '记录';
+    const plainNames = { sleep:'睡觉', wake:'起床', meal:'用餐', work:'工作', rest:'休息', exercise:'运动', study:'学习', custom:'' };
 
-    Utils.modal(title, `
+    // 项目类登记（学习/工作/XX）显示「项目统称 + 补充」；睡眠/起床仅显示备注
+    const isProject = ['study','work','meal','exercise','rest','custom'].includes(type);
+    let fieldsHTML;
+    if (isProject) {
+      fieldsHTML = `
+      <div class="form-group">
+        <label class="form-label">项目统称</label>
+        <input class="form-input" id="custom-name" value="${Utils.escape(plainNames[type] || '')}" placeholder="例如：学习 / 工作 / 项目名">
+      </div>
+      <div class="form-group">
+        <label class="form-label">补充（可选，输入具体细节）</label>
+        <input class="form-input" id="custom-note" placeholder="例如：高数复习 / 项目方案初稿">
+      </div>`;
+    } else {
+      fieldsHTML = `
       <div class="form-group">
         <label class="form-label">备注（可选）</label>
-        <input class="form-input" id="custom-desc" placeholder="补充说明...">
-      </div>
+        <input class="form-input" id="custom-note" placeholder="补充说明...">
+      </div>`;
+    }
+
+    Utils.modal(title, `
+      ${fieldsHTML}
       <div class="form-group">
         <label class="form-label">时间</label>
         <div style="display:flex; gap:8px">
@@ -2247,7 +2276,8 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
       </div>
       <button class="btn btn-primary btn-block" onclick="Views._confirmQuickLog('${type}')">记录</button>
     `, (c) => {
-      c.querySelector('#custom-desc').onkeydown = (e) => {
+      const noteEl = c.querySelector('#custom-note');
+      if (noteEl) noteEl.onkeydown = (e) => {
         if (e.key === 'Enter') Views._confirmQuickLog(type);
       };
       const updateDuration = () => {
@@ -2284,7 +2314,11 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
   },
 
   async _confirmQuickLog(type) {
-    const desc = document.getElementById('custom-desc').value.trim();
+    const nameEl = document.getElementById('custom-name');
+    const noteEl = document.getElementById('custom-note');
+    const name = (nameEl && nameEl.value || '').trim();
+    const note = (noteEl && noteEl.value || '').trim();
+    const desc = `${name} ${note}`.trim() || name || note || '自定义活动';
     const today = Utils.todayStr();
     if (!Store.data.dailyLogs[today]) Store.data.dailyLogs[today] = { activities: [] };
     const log = Store.data.dailyLogs[today];
@@ -2310,27 +2344,29 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
       const [eh, em2] = endVal.split(':').map(Number);
       let mins = (eh2 * 60 + em2) - (sh * 60 + sm);
       if (mins < 0) mins += 24 * 60;
-      activity = { type, mode: 'period', time: timeVal, startTime: startVal, endTime: endVal, duration: mins, desc };
+      activity = { type, mode: 'period', time: timeVal, startTime: startVal, endTime: endVal, duration: mins, name, note, desc };
     } else {
-      activity = { type, mode: 'point', time: timeVal, desc };
+      activity = { type, mode: 'point', time: timeVal, name, note, desc };
     }
     log.activities.push(activity);
 
-    // 自定义登记：有 Key -> AI 语义归类并计入对应目标进度；无 Key -> 仅记录并提示
-    if (type === 'custom') {
+    // 项目类登记（学习/工作/自定义等）：有 Key -> AI 理解语义并归入对应目标进度；无 Key -> 仅记录并提示
+    const aiTypes = ['study','work','meal','exercise','rest','custom'];
+    if (aiTypes.includes(type)) {
       if (AIClient.hasKey()) {
-        const cls = await this.classifyActivity(desc || '自定义活动');
+        const cls = await this.classifyActivity(desc);
         if (cls) {
           activity.goalLvlId = cls.lvlId;
           activity.goalCatId = cls.catId;
           activity.countsAsDone = true;
           activity.goalReason = cls.reason;
-          Utils.toast('已归类到「' + cls.catName + '」并计入进度 🎯', 'success');
+          const detail = note ? `（${note}）` : '';
+          Utils.toast('已归类到「' + cls.catName + '」' + detail + ' 并计入进度 🎯', 'success');
         } else {
           Utils.toast('已记录（未匹配到合适目标，可去计划页手动关联）', 'success');
         }
       } else {
-        Utils.toast('已记录（未配置 Key：自定义登记暂未计入进度。去设置填 DeepSeek Key 后可自动归类）', 'info');
+        Utils.toast('已记录（未配置 Key：登记暂未计入进度。去设置填 DeepSeek Key 后可自动归类）', 'info');
       }
     }
 
@@ -2338,9 +2374,10 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
     Utils.closeModal();
 
     if (Companion.hasCharacter() && AIClient.hasKey()) {
+      const detail = [labels[type] || type, note].filter(Boolean).join('：');
       const activityDesc = isPeriod
-        ? '（快捷记录）' + (labels[type] || type) + '，' + startVal + '到' + endVal + (desc ? '，' + desc : '')
-        : '（快捷记录）' + (labels[type] || type) + (desc ? '，' + desc : '');
+        ? '（快捷记录）' + detail + '，' + startVal + '到' + endVal
+        : '（快捷记录）' + detail;
       Views._notifyCompanion(activityDesc);
     } else {
       Router.render();
@@ -5310,7 +5347,7 @@ const Companion = {
     if (activities.length > 0) {
       const labels = { sleep:'睡觉', wake:'起床', meal:'用餐', work:'工作', rest:'休息', exercise:'运动', study:'学习', plan:'计划', custom:'其他' };
       p += `【今日活动记录】\n`;
-      p += activities.map(a => `- ${labels[a.type]||a.type} ${a.time}${a.desc ? ' '+a.desc : ''}`).join('\n') + '\n\n';
+      p += activities.map(a => `- ${labels[a.type]||a.type} ${a.time}${(a.note || a.desc) ? ' '+(a.note || a.desc) : ''}`).join('\n') + '\n\n';
     }
 
     // === 完整计划体系 ===
@@ -5698,21 +5735,16 @@ const App = {
     if ('serviceWorker' in navigator) {
       try {
         const reg = await navigator.serviceWorker.register('sw.js');
-        // 检测 SW 更新：新 SW 激活后自动刷新页面
-        reg.addEventListener('updatefound', () => {
-          const newWorker = reg.installing;
-          if (newWorker) {
-            newWorker.addEventListener('statechange', () => {
-              if (newWorker.state === 'activated' && navigator.serviceWorker.controller) {
-                window.location.reload();
-              }
-            });
-          }
+        // 新版本可用时：新 SW 接管控制即自动刷新页面（桌面图标点开也能拿到最新）
+        let refreshing = false;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          if (refreshing) return;
+          refreshing = true;
+          window.location.reload();
         });
-        // 如果已有 SW 在控制页面，也检查一次更新
-        if (navigator.serviceWorker.controller) {
-          reg.update();
-        }
+        // 主动检查更新：打开时一次 + 之后每分钟一次
+        reg.update();
+        setInterval(() => { try { reg.update(); } catch (e) {} }, 60000);
       } catch (e) {
         console.log('SW registration failed', e);
       }
