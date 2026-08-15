@@ -948,6 +948,7 @@ const Views = {
   /* ----- 计划体系 ----- */
   plans(el) {
     let html = '';
+    const hasPlan = Store.data.plans.levels.some(l => l.categories.length > 0);
 
     Store.data.plans.levels.forEach((lvl, lvlIdx) => {
       const lvlProgress = Progress.level(lvl);
@@ -992,6 +993,10 @@ const Views = {
       <button class="btn btn-primary btn-block" style="font-size:16px; padding:14px; background:linear-gradient(135deg, #FF6B6B, #FF8E53); box-shadow:0 4px 12px rgba(255,107,107,0.3)" onclick="AIGuide.startGlobal()">
         🤖 AI 帮我制定计划
       </button>
+
+      ${hasPlan ? `<button class="btn btn-block" style="font-size:15px; padding:13px; background:linear-gradient(135deg, #4ECDC4, #56CCF2); color:#fff; box-shadow:0 4px 12px rgba(78,205,196,0.3)" onclick="AIGuide.startUpdate()">
+        🔄 用 AI 更新已有计划
+      </button>` : ''}
 
       <div class="card" style="border:1.5px dashed var(--c-teal); background:rgba(78,205,196,0.05)">
         <div style="font-size:13px; color:var(--text-secondary); line-height:1.8">
@@ -3910,6 +3915,274 @@ ${fullText}
     s.chatHistory.push({ role: 'bot', text: `已创建 ${s.createdCategories.length} 个大类，分支已自动生成。现在进入任务拆分——把每个分支拆成可执行的小步骤。` });
     // ★ 跳过分支问答，直接进入任务拆分
     this._globalStartTaskSplit();
+  },
+
+  /* ===== 在已有计划基础上用 AI 增量更新（不推倒重来）===== */
+  updateState: null,
+
+  startUpdate() {
+    const hasPlan = Store.data.plans.levels.some(l => l.categories.length > 0);
+    if (!hasPlan) {
+      Utils.toast('还没有计划，请先点「🤖 AI 帮我制定计划」创建', 'warning');
+      return;
+    }
+    this.updateState = {
+      chatHistory: [],
+      request: '',
+      stage: 'input',
+      returned: null,
+      diff: null,
+    };
+    const greeting = '🔄 这是在你<b>已有计划</b>的基础上更新，不会推倒重来。\n\n'
+      + '告诉我你想怎么调整，例如：\n'
+      + '• "加一个关于运动的长期目标"\n'
+      + '• "把存钱应急那个分类删掉"\n'
+      + '• "给德语学习加几个分支方向"\n'
+      + '• "把学画画从自我实现挪到尊重需求"\n\n'
+      + '我会保留你没说要改的部分，只动你提到的地方。确认无误后再落地。';
+    this.updateState.chatHistory.push({ role: 'bot', text: greeting });
+    this._renderUpdateModal();
+  },
+
+  _serializePlan() {
+    const levelNames = { 'lvl-1':'生理需求','lvl-2':'安全需求','lvl-3':'社交需求','lvl-4':'尊重需求','lvl-5':'自我实现' };
+    const lines = [];
+    Store.data.plans.levels.forEach(l => {
+      l.categories.forEach(c => {
+        const branchNames = (c.branches || []).map(b => b.name).join('、');
+        const subInfo = branchNames ? `（已有分支：${branchNames}）` : '（暂无分支）';
+        lines.push(`[id=${c.id}][${levelNames[l.id] || l.id}] ${c.name} ${subInfo}`);
+      });
+    });
+    return lines.join('\n');
+  },
+
+  _renderUpdateModal() {
+    const s = this.updateState;
+    const fmt = m => m.role === 'bot'
+      ? m.text.replace(/\n/g, '<br>')
+      : Utils.escape(m.text).replace(/\n/g, '<br>');
+    const chatHTML = s.chatHistory.map(m => `<div class="ai-msg ai-msg-${m.role}">${fmt(m)}</div>`).join('');
+
+    let body = '';
+    if (s.stage === 'input') {
+      const suggestions = ['加一个运动相关的目标', '删掉存钱应急分类', '给德语学习加分支', '把学画画挪到尊重需求'];
+      body = `
+        <div class="ai-quick-options">
+          ${suggestions.map(t => `<span class="ai-quick-btn" onclick="AIGuide.updateQuick('${Utils.escape(t)}')">${Utils.escape(t)}</span>`).join('')}
+        </div>
+        <textarea id="ai-update-input" class="form-input" rows="3" placeholder="描述你想做的调整..." style="width:100%; margin-top:8px; font-size:13px">${Utils.escape(s.request)}</textarea>
+        ${!AIClient.hasKey() ? `<div style="font-size:12px; color:#e67e22; margin-top:6px">⚠️ 未检测到 DeepSeek Key，更新需联网调用 AI，请先在设置中配置 Key。</div>` : ''}
+        <button class="btn btn-primary btn-block mt-2" onclick="AIGuide.updateAnalyze()">🤖 让 AI 更新计划</button>`;
+    } else if (s.stage === 'thinking') {
+      body = `<div class="ai-msg ai-msg-bot"><div class="ai-typing">AI 正在基于你的现有计划做增量更新<span class="dot">.</span><span class="dot">.</span><span class="dot">.</span></div></div>`;
+    } else if (s.stage === 'preview') {
+      body = this._renderUpdatePreview();
+    }
+
+    Utils.modal('🔄 AI 更新计划', `
+      <div class="ai-chat" id="ai-chat">${chatHTML}</div>
+      ${body}
+    `, () => {
+      if (this._scrollChat) this._scrollChat();
+      const ta = document.getElementById('ai-update-input');
+      if (ta) ta.focus();
+    });
+  },
+
+  updateQuick(t) {
+    this.updateState.request = t;
+    this._renderUpdateModal();
+  },
+
+  async updateAnalyze() {
+    const s = this.updateState;
+    const ta = document.getElementById('ai-update-input');
+    const text = (ta ? ta.value : s.request || '').trim();
+    if (!text) { Utils.toast('请先描述你想做的调整', 'warning'); return; }
+    if (!AIClient.hasKey()) {
+      Utils.toast('更新计划需联网调用 AI，请先在设置中配置 DeepSeek Key', 'warning');
+      return;
+    }
+    s.request = text;
+    s.chatHistory.push({ role: 'user', text });
+    s.stage = 'thinking';
+    this._renderUpdateModal();
+
+    try {
+      const profile = this._buildProfileSummary();
+      const planText = this._serializePlan();
+      const prompt = `你是一个基于马斯洛需求层次理论的个人计划助手，任务是<b>在用户已有计划的基础上做增量更新</b>，绝不能推倒重来。
+
+【用户个人画像摘要】
+${profile || '（未填写）'}
+
+【用户当前已有计划（这是必须保留的基础）】
+${planText}
+
+【用户的更新需求】
+"""
+${text}
+"""
+
+【你的任务】
+根据用户需求，对上面的计划做<b>最小必要改动</b>，返回更新后的<b>完整计划清单</b>（JSON 数组）。规则：
+1. <b>保留所有用户没要求改/删的分类</b>，原样保留它们的 id、名称和层级，绝对不要遗漏或丢掉。
+2. 用户要求<b>新增</b>的分类：id 设为空字符串 ""，并给出 3-5 个 subTasks（具体可执行的小目标）。
+3. 用户要求<b>删除</b>的分类：直接从数组里去掉（不要返回它）。
+4. 用户要求<b>修改</b>的分类（改名/换层级）：必须保留其原有 id，只改 categoryName 或 levelId（改名时 id 绝不能丢）。
+5. 每个分类返回字段：{"id":"原有id或空串","levelId":"lvl-x","categoryName":"2-8字短句","reason":"为什么这样改/加","subTasks":["小目标1","小目标2",...]}
+6. 总数仍 ≤15，每层 ≤3；层级：lvl-1 生理 | lvl-2 安全 | lvl-3 社交 | lvl-4 尊重 | lvl-5 自我实现。
+
+【严格 JSON 格式】
+[
+  {"id":"...","levelId":"lvl-x","categoryName":"...","reason":"...","subTasks":[...]},
+  ...
+]`;
+
+      const result = await AIClient.callJSON(prompt, { temperature: 0.3 });
+      let list = Array.isArray(result) ? result : [];
+      list = list.filter(g => g && g.categoryName && String(g.categoryName).trim());
+      list = list.map(g => ({
+        id: (g.id && String(g.id).trim()) || '',
+        levelId: (g.levelId && String(g.levelId).startsWith('lvl-')) ? g.levelId : 'lvl-5',
+        categoryName: String(g.categoryName).trim().slice(0, 12),
+        reason: g.reason || '',
+        subTasks: Array.isArray(g.subTasks) ? g.subTasks.filter(t => t && String(t).trim()).map(t => String(t).trim()) : [],
+      }));
+      const levelCount = {};
+      list = list.filter(g => { const lid = g.levelId; levelCount[lid] = (levelCount[lid] || 0) + 1; return levelCount[lid] <= 3; });
+      if (list.length > 15) list = list.slice(0, 15);
+
+      s.returned = list;
+      s.diff = this._computeUpdateDiff(list);
+      s.stage = 'preview';
+      this._renderUpdateModal();
+    } catch (err) {
+      Utils.toast('AI 更新失败：' + err.message, 'error');
+      s.stage = 'input';
+      this._renderUpdateModal();
+    }
+  },
+
+  _computeUpdateDiff(list) {
+    const existingById = {};
+    const existingByName = {};
+    Store.data.plans.levels.forEach(l => l.categories.forEach(c => {
+      existingById[c.id] = { cat: c, levelId: l.id };
+      existingByName[String(c.name).trim().toLowerCase()] = c.id;
+    }));
+    const levelNames = { 'lvl-1':'生理需求','lvl-2':'安全需求','lvl-3':'社交需求','lvl-4':'尊重需求','lvl-5':'自我实现' };
+    const added = [], changed = [], kept = [], removed = [];
+    const consumedIds = new Set();
+
+    list.forEach(item => {
+      let found = item.id ? existingById[item.id] : null;
+      if (!found && item.categoryName) {
+        const nid = existingByName[String(item.categoryName).trim().toLowerCase()];
+        if (nid) found = existingById[nid];
+      }
+      if (found) {
+        consumedIds.add(found.cat.id);
+        const lvlChanged = found.levelId !== item.levelId;
+        const nameChanged = String(found.cat.name).trim() !== item.categoryName;
+        if (lvlChanged || nameChanged) {
+          changed.push({ from: `${levelNames[found.levelId] || ''}·${found.cat.name}`, to: `${levelNames[item.levelId] || ''}·${item.categoryName}`, reason: item.reason });
+        } else {
+          kept.push(item.categoryName);
+        }
+      } else {
+        added.push({ name: item.categoryName, level: levelNames[item.levelId] || item.levelId, reason: item.reason, subTasks: item.subTasks });
+      }
+    });
+
+    Store.data.plans.levels.forEach(l => l.categories.forEach(c => { if (!consumedIds.has(c.id)) removed.push(c.name); }));
+    return { added, changed, kept, removed };
+  },
+
+  _renderUpdatePreview() {
+    const s = this.updateState;
+    const d = s.diff;
+    let html = `<div style="font-size:13px; margin:8px 0">AI 将做以下改动（<b>未列出的分类保持不变</b>）：</div>`;
+    if (d.added.length) {
+      html += `<div class="card" style="border-left:3px solid var(--c-teal); margin:6px 0"><div style="font-weight:700; font-size:13px">➕ 新增 ${d.added.length} 个</div>`
+        + d.added.map(a => `<div style="font-size:12px; margin-top:4px">· ${Utils.escape(a.name)} <span style="color:var(--text-secondary)">(${Utils.escape(a.level)})</span>${a.subTasks && a.subTasks.length ? ` — 分支：${Utils.escape(a.subTasks.slice(0, 5).join('、'))}` : ''}</div>`).join('')
+        + `</div>`;
+    }
+    if (d.changed.length) {
+      html += `<div class="card" style="border-left:3px solid var(--c-yellow); margin:6px 0"><div style="font-weight:700; font-size:13px">✏️ 修改 ${d.changed.length} 个</div>`
+        + d.changed.map(c => `<div style="font-size:12px; margin-top:4px">· ${Utils.escape(c.from)} → <b>${Utils.escape(c.to)}</b></div>`).join('')
+        + `</div>`;
+    }
+    if (d.removed.length) {
+      html += `<div class="card" style="border-left:3px solid #e74c3c; margin:6px 0"><div style="font-weight:700; font-size:13px; color:#e74c3c">🗑️ 删除 ${d.removed.length} 个</div>`
+        + d.removed.map(n => `<div style="font-size:12px; margin-top:4px; color:#e74c3c">· ${Utils.escape(n)}</div>`).join('')
+        + `</div>`;
+    }
+    if (!d.added.length && !d.changed.length && !d.removed.length) {
+      html += `<div style="font-size:13px; color:var(--text-secondary); margin:6px 0">看起来没有需要改动的地方 🤔 你可以换个说法再试试。</div>`;
+    }
+    html += `
+      <div class="flex gap-2 mt-2">
+        <button class="btn btn-outline flex-1" onclick="AIGuide.updateCancel()">取消</button>
+        <button class="btn btn-primary flex-1" onclick="AIGuide.applyPlanUpdate()">✅ 确认更新</button>
+      </div>`;
+    return html;
+  },
+
+  updateCancel() {
+    Utils.closeModal();
+    this.updateState = null;
+    Router.navigate('plans');
+  },
+
+  applyPlanUpdate() {
+    const s = this.updateState;
+    const list = s.returned || [];
+    const existingById = {};
+    const existingByName = {};
+    Store.data.plans.levels.forEach(l => l.categories.forEach(c => {
+      existingById[c.id] = { cat: c, levelId: l.id };
+      existingByName[String(c.name).trim().toLowerCase()] = c.id;
+    }));
+    const levelOrder = ['lvl-1','lvl-2','lvl-3','lvl-4','lvl-5'];
+    const consumedIds = new Set();
+
+    list.forEach(item => {
+      let found = item.id ? existingById[item.id] : null;
+      if (!found && item.categoryName) {
+        const nid = existingByName[String(item.categoryName).trim().toLowerCase()];
+        if (nid) found = existingById[nid];
+      }
+      if (found) {
+        consumedIds.add(found.cat.id);
+        found.cat.name = item.categoryName;
+        if (found.levelId !== item.levelId && levelOrder.includes(item.levelId)) {
+          const oldLevel = Store.data.plans.levels.find(l => l.id === found.levelId);
+          const newLevel = Store.data.plans.levels.find(l => l.id === item.levelId);
+          if (oldLevel && newLevel && oldLevel !== newLevel) {
+            oldLevel.categories = oldLevel.categories.filter(x => x.id !== found.cat.id);
+            if (!newLevel.categories.find(x => x.id === found.cat.id)) newLevel.categories.push(found.cat);
+          }
+        }
+      } else {
+        const lvl = Store.data.plans.levels.find(l => l.id === item.levelId) || Store.data.plans.levels[4];
+        const newCat = { id: Utils.uid(), name: item.categoryName, branches: [], userNotes: item.reason };
+        (item.subTasks || []).forEach((st, si) => {
+          if (!st) return;
+          newCat.branches.push({ id: Utils.uid(), name: st, status: si < 3 ? 'confirmed' : 'uncertain', tasks: [] });
+        });
+        lvl.categories.push(newCat);
+        consumedIds.add(newCat.id);
+      }
+    });
+
+    Store.data.plans.levels.forEach(l => { l.categories = l.categories.filter(c => consumedIds.has(c.id)); });
+
+    Store.save();
+    Utils.toast('计划已更新！', 'success');
+    this.updateState = null;
+    Router.navigate('plans');
   },
 
   // ===== 分支级 AI 问答 =====
