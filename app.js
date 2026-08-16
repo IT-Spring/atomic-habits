@@ -62,6 +62,11 @@ const Store = {
         dailyFocus: { date: '', asked: false, collected: false, items: [], muted: false }, // 今日重点
         prefs: { tone: 'encouraging', pace: 'normal', quietHours: '', custom: '' }, // 陪伴偏好
       },
+      stats: {
+        level: 1, exp: 0, freePoints: 0, ap: 0, coins: 0,
+        manualBonus: {}, coinLedger: []
+      },
+      dailyDice: { date: '', rolled: false, task: '', amount: 0, unit: '', ones: null, tens: null },
       versionHistory: [],
       sopTemplates: [],
       settings: {
@@ -118,6 +123,18 @@ const Store = {
     if (!this.data.aiCharacter.chatHistory) this.data.aiCharacter.chatHistory = [];
     if (!this.data.aiCharacter.dailyFocus) this.data.aiCharacter.dailyFocus = { date: '', asked: false, collected: false, items: [], muted: false };
     if (!this.data.aiCharacter.prefs) this.data.aiCharacter.prefs = { tone: 'encouraging', pace: 'normal', quietHours: '', custom: '' };
+    // 跑团化：数值/游戏币/行动点/骰子
+    if (!this.data.stats) this.data.stats = { level: 1, exp: 0, freePoints: 0, ap: 0, coins: 0, manualBonus: {}, coinLedger: [] };
+    const _st = this.data.stats;
+    if (_st.level === undefined) _st.level = 1;
+    if (_st.exp === undefined) _st.exp = 0;
+    if (_st.freePoints === undefined) _st.freePoints = 0;
+    if (_st.ap === undefined) _st.ap = 0;
+    if (_st.coins === undefined) _st.coins = 0;
+    if (!_st.manualBonus) _st.manualBonus = {};
+    if (!_st.coinLedger) _st.coinLedger = [];
+    ['con', 'int', 'cha', 'agi', 'wil'].forEach(k => { if (_st.manualBonus[k] === undefined) _st.manualBonus[k] = 0; });
+    if (!this.data.dailyDice) this.data.dailyDice = { date: '', rolled: false, task: '', amount: 0, unit: '', ones: null, tens: null };
   },
 
   recordVersion(action, detail) {
@@ -409,6 +426,113 @@ const Progress = {
 };
 
 /* ========== 路由 ========== */
+/* ========== 跑团化：角色成长 / 游戏币 / 行动点 / 骰子 ========== */
+const Game = {
+  ATTR_KEYS: ['con', 'int', 'cha', 'agi', 'wil'],
+  ATTR_NAMES: { con: '体质', int: '智力', cha: '魅力', agi: '敏捷', wil: '意志' },
+  ATTR_ICONS: { con: '💪', int: '🧠', cha: '💬', agi: '⚡', wil: '🛡️' },
+
+  ensure() {
+    const d = Store.data;
+    if (!d.stats) d.stats = { level: 1, exp: 0, freePoints: 0, ap: 0, coins: 0, manualBonus: {}, coinLedger: [] };
+    const s = d.stats;
+    if (s.level === undefined) s.level = 1;
+    if (s.exp === undefined) s.exp = 0;
+    if (s.freePoints === undefined) s.freePoints = 0;
+    if (s.ap === undefined) s.ap = 0;
+    if (s.coins === undefined) s.coins = 0;
+    if (!s.manualBonus) s.manualBonus = {};
+    if (!s.coinLedger) s.coinLedger = [];
+    this.ATTR_KEYS.forEach(k => { if (s.manualBonus[k] === undefined) s.manualBonus[k] = 0; });
+    return s;
+  },
+
+  expToNext() { return 50 + this.ensure().level * 50; },
+
+  // 自动从计划/进度映射的属性底值（0-5 区间，初始不会太高）
+  baseAttrs() {
+    const plans = (Store.data.plans && Store.data.plans.levels) || [];
+    const acc = { con: 0, int: 0, cha: 0, agi: 0, wil: 0 };
+    const cnt = { con: 0, int: 0, cha: 0, agi: 0, wil: 0 };
+    const mapAttr = (name) => {
+      const n = name || '';
+      if (/健康|运动|作息|睡眠|身体|健身|跑步/.test(n)) return 'con';
+      if (/学习|工作|德语|阅读|写|研究|代码|专业|外语/.test(n)) return 'int';
+      if (/社交|陪伴|人际|关系|沟通|朋友/.test(n)) return 'cha';
+      if (/习惯|执行|专注|效率|自律/.test(n)) return 'agi';
+      if (/长期|坚持|目标|意义|成长|自我/.test(n)) return 'wil';
+      return null;
+    };
+    plans.forEach(lvl => (lvl.categories || []).forEach(cat => {
+      const a = mapAttr(cat.name);
+      let brAvg = 0, brN = 0;
+      (cat.branches || []).forEach(br => {
+        brN++;
+        let p = (typeof br.progress === 'number') ? br.progress : 0;
+        if (!brN && p === 0 && br.tasks && br.tasks.length) p = Math.round(br.tasks.reduce((s, t) => s + (t.progress || 0), 0) / br.tasks.length);
+        brAvg += p;
+        const aw = mapAttr(br.name);
+        if (aw) { acc[aw] += p / 100; cnt[aw]++; }
+        (br.tasks || []).forEach(t => {
+          const at = mapAttr(t.name);
+          if (at) { acc[at] += (t.progress || 0) / 100; cnt[at]++; }
+        });
+      });
+      if (a) { acc[a] += brN ? brAvg / brN / 100 : 0; cnt[a]++; }
+    }));
+    const out = {};
+    this.ATTR_KEYS.forEach(k => { out[k] = Math.min(5, Math.round((acc[k] / (cnt[k] || 1)) * 5)); });
+    return out;
+  },
+
+  attrs() {
+    const s = this.ensure();
+    const base = this.baseAttrs();
+    const out = {};
+    this.ATTR_KEYS.forEach(k => { out[k] = base[k] + (s.manualBonus[k] || 0); });
+    return out;
+  },
+
+  // 完成任务发奖励：游戏币(1+d6) + 行动点(1) + EXP（真实加成，接现实）
+  award(context) {
+    const s = this.ensure();
+    const d6 = 1 + Math.floor(Math.random() * 6);
+    const coins = 1 + d6;
+    s.coins += coins;
+    s.ap += 1;
+    const expGain = (context && context.exp) ? context.exp : 20;
+    s.exp += expGain;
+    let leveled = 0;
+    while (s.exp >= this.expToNext()) { s.exp -= this.expToNext(); s.level++; s.freePoints++; leveled++; }
+    Store.save();
+    return { coins, d6, ap: 1, exp: expGain, leveled, level: s.level };
+  },
+
+  spendAP(attr) {
+    const s = this.ensure();
+    if (s.ap <= 0) return false;
+    if (!this.ATTR_KEYS.includes(attr)) return false;
+    s.ap -= 1;
+    s.manualBonus[attr] = (s.manualBonus[attr] || 0) + 1;
+    Store.save();
+    return true;
+  },
+
+  redeem(spent, gift) {
+    const s = this.ensure();
+    spent = Math.max(0, Math.floor(Number(spent) || 0));
+    if (spent <= 0) return { ok: false, msg: '请输入有效币数' };
+    if (s.coins < spent) return { ok: false, msg: '游戏币不足' };
+    s.coins -= spent;
+    s.coinLedger.unshift({ time: new Date().toISOString(), coins: spent, gift: gift || '' });
+    if (s.coinLedger.length > 100) s.coinLedger = s.coinLedger.slice(0, 100);
+    Store.save();
+    return { ok: true, left: s.coins };
+  },
+
+  coinsToYuan() { return (this.ensure().coins / 25).toFixed(2); },
+};
+
 const Router = {
   current: 'dashboard',
 
@@ -417,7 +541,7 @@ const Router = {
     document.querySelectorAll('.nav-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.view === view);
     });
-    const titles = { dashboard: '概览', profile: '个人信息', plans: '计划体系', daily: '每日登记', companion: '陪伴', settings: '设置' };
+    const titles = { dashboard: '概览', profile: '个人信息', plans: '计划体系', daily: '每日登记', companion: '陪伴', settings: '设置', stats: '数值', dice: '骰子' };
     document.getElementById('page-title').textContent = titles[view] || '';
     this.render();
   },
@@ -432,12 +556,193 @@ const Router = {
       case 'daily': Views.daily(main); break;
       case 'companion': Views.companion(main); break;
       case 'settings': Views.settings(main); break;
+      case 'stats': Views.stats(main); break;
+      case 'dice': Views.dice(main); break;
     }
   },
 };
 
 /* ========== 视图渲染 ========== */
 const Views = {
+
+  /* ----- 数值页（跑团化） ----- */
+  stats(el) {
+    const g = Game.ensure();
+    const attrs = Game.attrs();
+    const expNeed = Game.expToNext();
+    const yuan = Game.coinsToYuan();
+    const ap = g.ap;
+    const attrRows = Game.ATTR_KEYS.map(k => `
+      <div class="card" style="border-left:4px solid var(--c-teal); margin-bottom:10px">
+        <div class="flex items-center justify-between">
+          <div>
+            <span class="font-bold">${Game.ATTR_ICONS[k]} ${Game.ATTR_NAMES[k]}</span>
+            <span class="text-sm text-light ml-2">${attrs[k]}</span>
+          </div>
+          <button class="btn btn-secondary btn-sm" ${ap > 0 ? '' : 'disabled style="opacity:.5;cursor:not-allowed"'} onclick="Game.spendAP('${k}'); Views.stats(document.getElementById('main-content'));">+1（行动点${ap}）</button>
+        </div>
+      </div>
+    `).join('');
+    const ledger = (g.coinLedger || []).slice(0, 8).map(r => `
+      <div class="text-xs" style="padding:4px 0; border-bottom:1px solid var(--border)">- ${r.coins} 币 ${r.gift ? '· ' + Utils.escape(r.gift) : ''} <span class="text-light">${Utils.formatDate(r.time)}</span></div>
+    `).join('') || '<div class="text-xs text-light">还没有兑换记录</div>';
+
+    el.innerHTML = `
+      <div class="card" style="background:linear-gradient(135deg,#6EC1E4,#C4A7E7); color:#fff">
+        <div class="flex items-center justify-between">
+          <div>
+            <div class="text-sm" style="opacity:.85">角色等级</div>
+            <div style="font-size:32px; font-weight:800">Lv.${g.level}</div>
+          </div>
+          <div style="text-align:right">
+            <div class="text-sm" style="opacity:.85">行动点 AP</div>
+            <div style="font-size:32px; font-weight:800">${ap}</div>
+          </div>
+        </div>
+        <div style="margin-top:8px">${Progress.progressBar(Math.round(g.exp / expNeed * 100), true)}</div>
+        <div class="text-xs mt-1" style="opacity:.85">EXP ${g.exp}/${expNeed}${g.freePoints > 0 ? ' · 可分配点 ' + g.freePoints : ''}</div>
+      </div>
+
+      <div class="card" style="border-left:4px solid var(--c-coral)">
+        <div class="flex items-center justify-between">
+          <div class="card-title" style="margin:0">🪙 游戏币</div>
+          <div style="font-size:24px; font-weight:800; color:var(--c-coral)">${g.coins}</div>
+        </div>
+        <div class="text-sm text-light mt-1">≈ ¥${yuan}（25 币 = 1 元，礼品你现实自买后在此登记扣除）</div>
+      </div>
+
+      <div class="section-title">属性（花 1 行动点 +1，对应身份认同投票）</div>
+      ${attrRows}
+
+      <div class="card">
+        <div class="card-title" style="margin:0 0 10px">🎁 兑换登记（扣游戏币）</div>
+        <div class="form-group">
+          <input class="form-input" id="redeem-coins" type="number" min="1" placeholder="花费游戏币数">
+        </div>
+        <div class="form-group">
+          <input class="form-input" id="redeem-gift" placeholder="礼品名（如：一杯奶茶）">
+        </div>
+        <button class="btn btn-primary btn-block" onclick="Views._redeem()">登记扣除</button>
+        <div class="section-title" style="margin-top:14px">兑换记录</div>
+        ${ledger}
+      </div>
+    `;
+  },
+
+  _redeem() {
+    const coins = document.getElementById('redeem-coins').value;
+    const gift = (document.getElementById('redeem-gift').value || '').trim();
+    const res = Game.redeem(coins, gift);
+    if (res.ok) Utils.toast('已扣除，剩余 ' + res.left + ' 币 🪙', 'success');
+    else Utils.toast(res.msg, 'error');
+    Views.stats(document.getElementById('main-content'));
+  },
+
+  /* ----- 骰子页（双 d10：先个位后十位） ----- */
+  dice(el) {
+    const dd = Store.data.dailyDice || { date: '', rolled: false };
+    const today = Utils.todayStr();
+    const isToday = dd.date === today;
+    const pool = this._dicePool();
+    const poolHTML = pool.length ? pool.map((p, i) => `<div class="text-xs" style="padding:3px 0">${i + 1}. ${Utils.escape(p.name)}${p.catName ? ' <span class="text-light">(' + Utils.escape(p.catName) + ')</span>' : ''}</div>`).join('') : '<div class="text-xs text-light">还没有计划任务，先去计划页添加</div>';
+    const st = Views._dice || { ones: null, tens: null };
+    const ones = st.ones, tens = st.tens;
+    const both = (ones !== null && tens !== null);
+    let resultHTML = '';
+    if (isToday && dd.rolled) {
+      resultHTML = `<div class="card" style="border-left:4px solid var(--c-teal)">
+        <div class="text-sm text-light">今日任务（已掷）</div>
+        <div class="font-bold mt-1" style="font-size:18px">${Utils.escape(dd.task)} ×${dd.amount}${dd.unit}</div>
+        <button class="btn btn-secondary btn-sm mt-2" onclick="Router.navigate('daily')">去登记完成 →</button>
+      </div>`;
+    } else if (both) {
+      let taskName, amount = 0, unit = '';
+      if (tens === 0) {
+        const rng = ['散步 5 分钟', '做 1 件让自己开心的事', '喝一杯水', '伸个懒腰活动肩颈', '整理桌面 1 分钟', '对镜子笑一下'];
+        taskName = '奇遇：' + rng[Math.floor(Math.random() * rng.length)];
+        unit = '次'; amount = 1;
+      } else {
+        const t = pool[tens - 1];
+        if (!t) { taskName = '（任务池不足 ' + tens + '，请重新掷）'; }
+        else {
+          taskName = t.name;
+          const ur = this._diceUnitRange(t.name);
+          unit = ur.unit;
+          amount = ur.min + Math.round(ones / 9 * (ur.max - ur.min));
+        }
+      }
+      resultHTML = `<div class="card" style="border-left:4px solid var(--c-lavender)">
+        <div class="text-sm text-light">本次掷骰：${tens}${ones}（十位选任务 · 个位定量）</div>
+        <div class="font-bold mt-1" style="font-size:18px">${Utils.escape(taskName)} ${amount ? '×' + amount + unit : ''}</div>
+        ${taskName.indexOf('不足') < 0 ? `<button class="btn btn-primary btn-sm mt-2" onclick='Views._saveDice(${JSON.stringify(taskName)}, ${amount}, ${JSON.stringify(unit)})'>存为今日任务</button>` : ''}
+        <button class="btn btn-secondary btn-sm mt-2" onclick="Views._diceRollReset()">重新掷</button>
+      </div>`;
+    }
+
+    el.innerHTML = `
+      <div class="card" style="background:linear-gradient(135deg,#FF6B6B,#C4A7E7); color:#fff">
+        <div class="text-sm" style="opacity:.85">骰子页</div>
+        <div class="font-bold mt-1" style="font-size:18px">双十面骰：先掷个位，再掷十位</div>
+        <div class="text-xs mt-1" style="opacity:.85">十位 = 选哪个任务，个位 = 做多少（真实量）</div>
+      </div>
+
+      <div class="flex gap-3" style="justify-content:center; margin:16px 0">
+        <div class="dice-face" style="font-size:40px">${ones === null ? '–' : ones}</div>
+        <div class="dice-face" style="font-size:40px">${tens === null ? '–' : tens}</div>
+      </div>
+      <div class="flex gap-3">
+        <button class="btn btn-primary" style="flex:1" onclick="Views._rollDice('ones')">🎲 掷个位</button>
+        <button class="btn btn-primary" style="flex:1" onclick="Views._rollDice('tens')">🎲 掷十位</button>
+      </div>
+
+      ${resultHTML}
+
+      <div class="section-title" style="margin-top:16px">今日任务池（十位对应序号）</div>
+      <div class="card">${poolHTML}</div>
+    `;
+  },
+
+  _dicePool() {
+    const pool = [];
+    const plans = (Store.data.plans && Store.data.plans.levels) || [];
+    plans.forEach(lvl => (lvl.categories || []).forEach(cat => (cat.branches || []).forEach(br => {
+      pool.push({ name: br.name, catName: cat.name });
+    })));
+    const focus = (Store.data.aiCharacter && Store.data.aiCharacter.dailyFocus && Store.data.aiCharacter.dailyFocus.items) || [];
+    focus.forEach(f => pool.push({ name: f, catName: '今日重点' }));
+    return pool.slice(0, 9);
+  },
+
+  _diceUnitRange(name) {
+    const n = name || '';
+    if (/单词|背|词汇|记忆/.test(n)) return { unit: '个', min: 1, max: 10 };
+    if (/跑步|跑|运动|锻炼|健身|瑜伽|拉伸/.test(n)) return { unit: '分钟', min: 5, max: 30 };
+    if (/阅读|读书|看|文献/.test(n)) return { unit: '页', min: 1, max: 15 };
+    if (/德语|外语|英语/.test(n)) return { unit: '分钟', min: 5, max: 25 };
+    if (/写作|写|日记|笔记|论文/.test(n)) return { unit: '字', min: 50, max: 500 };
+    if (/冥想|正念/.test(n)) return { unit: '分钟', min: 3, max: 15 };
+    return { unit: '个', min: 1, max: 10 };
+  },
+
+  _rollDice(which) {
+    Views._dice = Views._dice || { ones: null, tens: null };
+    Views._dice[which] = Math.floor(Math.random() * 10);
+    Views.dice(document.getElementById('main-content'));
+  },
+
+  _diceRollReset() {
+    Views._dice = { ones: null, tens: null };
+    Views.dice(document.getElementById('main-content'));
+  },
+
+  _saveDice(task, amount, unit) {
+    const today = Utils.todayStr();
+    Store.data.dailyDice = { date: today, rolled: true, task: task, amount: amount, unit: unit, ones: (Views._dice || {}).ones, tens: (Views._dice || {}).tens };
+    Store.save();
+    Utils.toast('已存为今日任务 ✅', 'success');
+    Views.dice(document.getElementById('main-content'));
+  },
+
 
   /* ----- 概览 ----- */
   dashboard(el) {
@@ -506,6 +811,12 @@ const Views = {
           <div class="stat-value" style="color:var(--c-teal)">${taskCount}</div>
           <div class="stat-label">总任务数</div>
         </div>
+      </div>
+
+      <div class="stat-grid" style="grid-template-columns:repeat(3,1fr)">
+        <div class="stat-card"><div class="stat-value" style="color:var(--c-lavender)">Lv.${Game.ensure().level}</div><div class="stat-label">等级</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:var(--c-coral)">${Game.ensure().coins}</div><div class="stat-label">🪙 游戏币</div></div>
+        <div class="stat-card"><div class="stat-value" style="color:var(--c-teal)">${Game.ensure().ap}</div><div class="stat-label">⚡ 行动点</div></div>
       </div>
 
       ${todaySpend.count > 0 ? `
@@ -2451,6 +2762,8 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
       } else {
         Utils.toast('已记录（未配置 Key：登记暂未计入进度。去设置填 DeepSeek Key 后可自动归类）', 'info');
       }
+      const rw = Game.award({ exp: 20 });
+      Utils.toast(`🎲 任务完成！游戏币+${rw.coins}（d6=${rw.d6}） 行动点+1${rw.leveled ? ' · 升级 Lv' + rw.level + '!' : ''}`, 'success');
     }
 
     Store.save();
@@ -4987,6 +5300,8 @@ ${profile || '（未填写）'}
 
     this.aiTip = '';
     Utils.toast(`完成「${task.taskName}」！🎉`, 'success');
+    const rw = Game.award({ exp: 30 });
+    Utils.toast(`🎲 游戏币+${rw.coins} 行动点+1${rw.leveled ? ' · 升级 Lv' + rw.level + '!' : ''}`, 'success');
 
     // 切到下一个任务
     const remaining = this.getIncompleteTasks();

@@ -17,32 +17,19 @@
 </head>
 <body>
   <div id="app">
-    <!-- 顶部栏 -->
-    <header class="top-bar">
-      <div class="top-bar-left">
-        <h1 class="app-title" id="page-title">概览</h1>
-      </div>
-      <div class="top-bar-right">
-        <button class="icon-btn" id="ai-remind-btn" title="和 AI 推进一件事" onclick="AIReprompt.open()">
-          <span>🤖</span>
-        </button>
-        <button class="icon-btn" id="reminder-quick-btn" title="提醒">
-          <span id="reminder-icon">🔔</span>
-          <span class="badge" id="reminder-badge" style="display:none">!</span>
-        </button>
-      </div>
-    </header>
-
-    <!-- 主内容区 -->
-    <main class="content" id="main-content">
-      <!-- 各视图由 JS 动态渲染 -->
-    </main>
-
-    <!-- 底部导航 -->
-    <nav class="bottom-nav">
+    <!-- 左侧窄图标栏 -->
+    <nav class="side-nav">
       <button class="nav-btn active" data-view="dashboard">
         <span class="nav-icon">🏠</span>
         <span class="nav-label">概览</span>
+      </button>
+      <button class="nav-btn" data-view="stats">
+        <span class="nav-icon">🎮</span>
+        <span class="nav-label">数值</span>
+      </button>
+      <button class="nav-btn" data-view="dice">
+        <span class="nav-icon">🎲</span>
+        <span class="nav-label">骰子</span>
       </button>
       <button class="nav-btn" data-view="profile">
         <span class="nav-icon">👤</span>
@@ -73,6 +60,30 @@
         <span class="nav-label">设置</span>
       </button>
     </nav>
+
+    <!-- 主区域 -->
+    <div class="app-main">
+      <!-- 顶部栏 -->
+      <header class="top-bar">
+        <div class="top-bar-left">
+          <h1 class="app-title" id="page-title">概览</h1>
+        </div>
+        <div class="top-bar-right">
+          <button class="icon-btn" id="ai-remind-btn" title="和 AI 推进一件事" onclick="AIReprompt.open()">
+            <span>🤖</span>
+          </button>
+          <button class="icon-btn" id="reminder-quick-btn" title="提醒">
+            <span id="reminder-icon">🔔</span>
+            <span class="badge" id="reminder-badge" style="display:none">!</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- 主内容区 -->
+      <main class="content" id="main-content">
+        <!-- 各视图由 JS 动态渲染 -->
+      </main>
+    </div>
   </div>
 
   <!-- 模态框容器 -->

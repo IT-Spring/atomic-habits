@@ -41,9 +41,9 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
-  // 其余静态资源：网络优先，断网回退缓存
+  // 其余静态资源：网络优先（同样绕过 HTTP 缓存取最新），断网回退缓存
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: "reload" })
       .then((resp) => {
         if (resp && resp.status === 200) {
           caches.open(CACHE_NAME).then((c) => c.put(e.request, resp.clone()));
