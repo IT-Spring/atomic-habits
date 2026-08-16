@@ -269,6 +269,19 @@ const Progress = {
     return `<div class="${cls}"><div class="progress-fill" style="width:${Math.min(100, Math.max(0, percent))}%"></div></div>`;
   },
 
+  // 今日计划：基于已完成分钟数的专注进度（与「今日」页同源）
+  todayPlanProgress() {
+    const tp = (Store.data.todayPlan && Store.data.todayPlan.items) || [];
+    const doneItems = tp.filter(i => i.done && !i.skipped);
+    const completedMin = doneItems.reduce((s, i) => s + (i.durMin || 0), 0);
+    const target = 120; // 每日建议专注分钟（软目标，仅作进度展示）
+    const pct = Math.min(100, Math.round(completedMin / target * 100));
+    const rollsLeft = tp.filter(i => i.reward && i.done && !i.rolled && !i.skipped).length;
+    const done = tp.filter(i => i.done).length;
+    const total = tp.length;
+    return { completedMin, target, pct, rollsLeft, done, total };
+  },
+
   progressWithLabel(percent, label, large) {
     return `
       <div class="progress-info">
@@ -867,6 +880,7 @@ const Views = {
     const hasChar = Companion.hasCharacter();
 
     const todayInfo = Progress.todayProgress();
+    const todayPlanP = Progress.todayPlanProgress();
     const catProg = Progress.todayCategoryProgress();
     let catHTML = '';
     if (catProg.length > 0) {
@@ -960,6 +974,19 @@ const Views = {
           </div>
         </div>
       `}
+
+      <div class="card" style="border-left:4px solid var(--c-teal); cursor:pointer" onclick="Router.navigate('dice')">
+        <div class="flex items-center justify-between mb-2">
+          <div class="card-title" style="margin:0">🎯 今日计划</div>
+          <span class="text-xs text-light">${todayPlanP.pct}% · 去添加 ›</span>
+        </div>
+        <div style="font-size:26px; font-weight:800; color:var(--c-teal)">${todayPlanP.completedMin}<span style="font-size:14px; font-weight:500; color:var(--text-light)"> / ${todayPlanP.target} 分钟</span></div>
+        ${Progress.progressBar(todayPlanP.pct, true)}
+        <div class="flex gap-3 mt-2" style="font-size:12px; opacity:.85">
+          <span>✅ ${todayPlanP.done}/${todayPlanP.total} 项已勾</span>
+          ${todayPlanP.rollsLeft ? `<span style="color:var(--c-coral)">🎲 还可掷骰 ${todayPlanP.rollsLeft} 次</span>` : ''}
+        </div>
+      </div>
 
       <div class="card">
         <div class="card-title">📊 今日分类进度</div>
