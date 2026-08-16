@@ -66,7 +66,7 @@ const Store = {
         level: 1, exp: 0, freePoints: 0, ap: 0, coins: 0,
         manualBonus: {}, coinLedger: []
       },
-      dailyDice: { date: '', rolled: false, task: '', amount: 0, unit: '', ones: null, tens: null },
+      todayPlan: { date: '', items: [] }, // 今日计划：{id,text,durMin,reward,done,rolled,rewardResult,skipped,skipReason}
       versionHistory: [],
       sopTemplates: [],
       settings: {
@@ -134,7 +134,8 @@ const Store = {
     if (!_st.manualBonus) _st.manualBonus = {};
     if (!_st.coinLedger) _st.coinLedger = [];
     ['con', 'int', 'cha', 'agi', 'wil'].forEach(k => { if (_st.manualBonus[k] === undefined) _st.manualBonus[k] = 0; });
-    if (!this.data.dailyDice) this.data.dailyDice = { date: '', rolled: false, task: '', amount: 0, unit: '', ones: null, tens: null };
+    if (!this.data.todayPlan) this.data.todayPlan = { date: '', items: [] };
+    if (!this.data.todayPlan.items) this.data.todayPlan.items = [];
   },
 
   recordVersion(action, detail) {
@@ -510,12 +511,58 @@ const Game = {
 
   spendAP(attr) {
     const s = this.ensure();
-    if (s.ap <= 0) return false;
+    if (s.ap < 50) return false;
     if (!this.ATTR_KEYS.includes(attr)) return false;
-    s.ap -= 1;
+    s.ap -= 50;
     s.manualBonus[attr] = (s.manualBonus[attr] || 0) + 1;
     Store.save();
     return true;
+  },
+
+  // ============ 今日计划（取代一次性骰子） ============
+  ensureToday() {
+    const d = Store.data;
+    if (!d.todayPlan) d.todayPlan = { date: '', items: [] };
+    const t = Utils.todayStr();
+    if (d.todayPlan.date !== t) d.todayPlan = { date: t, items: [] };
+    return d.todayPlan;
+  },
+
+  todayItem(id) {
+    const tp = this.ensureToday();
+    return tp.items.find(i => i.id === id);
+  },
+
+  // 让 AI 估算任务所需分钟（带奖励门槛：<15 分钟无奖励）
+  async estimateTaskDuration(text) {
+    if (!AIClient.hasKey()) return null;
+    try {
+      const r = await AIClient.callChat(
+        [{ role: 'user', content: `估算下面这个任务大概需要几分钟完成，只回复一个整数分钟数，不要任何解释：${text}` }],
+        { system: '你是时间估算器，只输出一个整数分钟数。', temperature: 0.3, maxTokens: 24 }
+      );
+      const m = (r || '').match(/(\d+)/);
+      if (m) return Math.max(1, parseInt(m[1], 10));
+    } catch (e) {}
+    return null;
+  },
+
+  // 手动掷骰领奖：双 d6（币/行动点各一），按 分钟/15 缩放，保证拆分/合并总量不变
+  rollReward(durMin) {
+    const s = this.ensure();
+    const units = Math.max(1, durMin / 15);
+    const dCoin = 1 + Math.floor(Math.random() * 6); // 2-7
+    const dAP = 1 + Math.floor(Math.random() * 6);   // 2-7
+    const coins = Math.max(1, Math.round(dCoin * units));
+    const ap = Math.max(1, Math.round(dAP * units));
+    const expGain = Math.round(20 * units);
+    s.coins += coins;
+    s.ap += ap;
+    s.exp += expGain;
+    let leveled = 0;
+    while (s.exp >= this.expToNext()) { s.exp -= this.expToNext(); s.level++; s.freePoints++; leveled++; }
+    Store.save();
+    return { coins, ap, exp: expGain, leveled, level: s.level, units };
   },
 
   redeem(spent, gift) {
@@ -530,7 +577,7 @@ const Game = {
     return { ok: true, left: s.coins };
   },
 
-  coinsToYuan() { return (this.ensure().coins / 25).toFixed(2); },
+  coinsToYuan() { return (this.ensure().coins / 50).toFixed(2); },
 };
 
 const Router = {
@@ -541,7 +588,7 @@ const Router = {
     document.querySelectorAll('.nav-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.view === view);
     });
-    const titles = { dashboard: '概览', profile: '个人信息', plans: '计划体系', daily: '每日登记', companion: '陪伴', settings: '设置', stats: '数值', dice: '骰子' };
+    const titles = { dashboard: '概览', profile: '个人信息', plans: '计划体系', daily: '每日登记', companion: '陪伴', settings: '设置', stats: '数值', dice: '今日' };
     document.getElementById('page-title').textContent = titles[view] || '';
     this.render();
   },
@@ -579,7 +626,7 @@ const Views = {
             <span class="font-bold">${Game.ATTR_ICONS[k]} ${Game.ATTR_NAMES[k]}</span>
             <span class="text-sm text-light ml-2">${attrs[k]}</span>
           </div>
-          <button class="btn btn-secondary btn-sm" ${ap > 0 ? '' : 'disabled style="opacity:.5;cursor:not-allowed"'} onclick="Game.spendAP('${k}'); Views.stats(document.getElementById('main-content'));">+1（行动点${ap}）</button>
+          <button class="btn btn-secondary btn-sm" ${ap >= 50 ? '' : 'disabled style="opacity:.5;cursor:not-allowed"'} onclick="Game.spendAP('${k}'); Views.stats(document.getElementById('main-content'));">+1（满 50 行动点）</button>
         </div>
       </div>
     `).join('');
@@ -608,10 +655,10 @@ const Views = {
           <div class="card-title" style="margin:0">🪙 游戏币</div>
           <div style="font-size:24px; font-weight:800; color:var(--c-coral)">${g.coins}</div>
         </div>
-        <div class="text-sm text-light mt-1">≈ ¥${yuan}（25 币 = 1 元，礼品你现实自买后在此登记扣除）</div>
+        <div class="text-sm text-light mt-1">≈ ¥${yuan}（50 币 = 1 元，礼品你现实自买后在此登记扣除）</div>
       </div>
 
-      <div class="section-title">属性（花 1 行动点 +1，对应身份认同投票）</div>
+      <div class="section-title">属性（攒满 50 行动点 +1，对应身份认同投票）</div>
       ${attrRows}
 
       <div class="card">
@@ -638,108 +685,169 @@ const Views = {
     Views.stats(document.getElementById('main-content'));
   },
 
-  /* ----- 骰子页（双 d10：先个位后十位） ----- */
+  /* ----- 今日计划 + 掷骰（取代一次性骰子） ----- */
   dice(el) {
-    const dd = Store.data.dailyDice || { date: '', rolled: false };
-    const today = Utils.todayStr();
-    const isToday = dd.date === today;
-    const pool = this._dicePool();
-    const poolHTML = pool.length ? pool.map((p, i) => `<div class="text-xs" style="padding:3px 0">${i + 1}. ${Utils.escape(p.name)}${p.catName ? ' <span class="text-light">(' + Utils.escape(p.catName) + ')</span>' : ''}</div>`).join('') : '<div class="text-xs text-light">还没有计划任务，先去计划页添加</div>';
-    const st = Views._dice || { ones: null, tens: null };
-    const ones = st.ones, tens = st.tens;
-    const both = (ones !== null && tens !== null);
-    let resultHTML = '';
-    if (isToday && dd.rolled) {
-      resultHTML = `<div class="card" style="border-left:4px solid var(--c-teal)">
-        <div class="text-sm text-light">今日任务（已掷）</div>
-        <div class="font-bold mt-1" style="font-size:18px">${Utils.escape(dd.task)} ×${dd.amount}${dd.unit}</div>
-        <button class="btn btn-secondary btn-sm mt-2" onclick="Router.navigate('daily')">去登记完成 →</button>
-      </div>`;
-    } else if (both) {
-      let taskName, amount = 0, unit = '';
-      if (tens === 0) {
-        const rng = ['散步 5 分钟', '做 1 件让自己开心的事', '喝一杯水', '伸个懒腰活动肩颈', '整理桌面 1 分钟', '对镜子笑一下'];
-        taskName = '奇遇：' + rng[Math.floor(Math.random() * rng.length)];
-        unit = '次'; amount = 1;
-      } else {
-        const t = pool[tens - 1];
-        if (!t) { taskName = '（任务池不足 ' + tens + '，请重新掷）'; }
-        else {
-          taskName = t.name;
-          const ur = this._diceUnitRange(t.name);
-          unit = ur.unit;
-          amount = ur.min + Math.round(ones / 9 * (ur.max - ur.min));
-        }
-      }
-      resultHTML = `<div class="card" style="border-left:4px solid var(--c-lavender)">
-        <div class="text-sm text-light">本次掷骰：${tens}${ones}（十位选任务 · 个位定量）</div>
-        <div class="font-bold mt-1" style="font-size:18px">${Utils.escape(taskName)} ${amount ? '×' + amount + unit : ''}</div>
-        ${taskName.indexOf('不足') < 0 ? `<button class="btn btn-primary btn-sm mt-2" onclick='Views._saveDice(${JSON.stringify(taskName)}, ${amount}, ${JSON.stringify(unit)})'>存为今日任务</button>` : ''}
-        <button class="btn btn-secondary btn-sm mt-2" onclick="Views._diceRollReset()">重新掷</button>
-      </div>`;
-    }
+    const tp = Game.ensureToday();
+    const doneItems = tp.items.filter(i => i.done && !i.skipped);
+    const completedMin = doneItems.reduce((s, i) => s + (i.durMin || 0), 0);
+    const target = 120; // 每日建议专注分钟（软目标，仅作进度展示）
+    const pct = Math.min(100, Math.round(completedMin / target * 100));
+    const rollsLeft = tp.items.filter(i => i.reward && i.done && !i.rolled && !i.skipped).length;
+
+    const itemsHTML = tp.items.length ? tp.items.map(it => {
+      const rewardBadge = it.reward
+        ? `<span style="color:var(--c-teal);font-size:12px">🎲 可掷骰</span>`
+        : `<span style="color:var(--c-coral);font-size:12px">＜15分·仅进度</span>`;
+      const action = it.skipped
+        ? `<span class="text-xs text-light">已跳过（${Utils.escape(it.skipReason || '')}）</span>`
+        : (it.done && it.reward && !it.rolled)
+          ? `<button class="btn btn-primary btn-sm" onclick="Views._todayRoll('${it.id}')">🎲 掷骰领奖励</button>`
+          : (it.done && it.reward && it.rolled)
+            ? `<span class="text-xs" style="color:var(--c-teal)">已领 🪙${it.rewardResult.coins} · 行动点${it.rewardResult.ap}</span>`
+            : (it.done && !it.reward)
+              ? `<span class="text-xs text-light">已计入进度</span>`
+              : `<button class="btn btn-secondary btn-sm" onclick="Views._todaySkip('${it.id}')">放弃</button>`;
+      return `
+        <div class="card" style="margin-bottom:10px; ${it.done ? 'opacity:.7' : ''}">
+          <div class="flex items-center justify-between">
+            <label class="flex items-center gap-2" style="flex:1; cursor:pointer">
+              <input type="checkbox" ${it.done ? 'checked' : ''} onchange="Views._todayToggle('${it.id}')" style="width:18px;height:18px">
+              <span class="${it.done ? 'line-through' : ''}">${Utils.escape(it.text)}</span>
+            </label>
+            <button class="icon-btn" onclick="Views._todayRemove('${it.id}')" title="删除" style="font-size:14px;opacity:.6">✕</button>
+          </div>
+          <div class="flex items-center justify-between mt-1">
+            <span class="text-xs text-light">${it.durMin} 分钟 · ${rewardBadge}</span>
+            ${action}
+          </div>
+        </div>`;
+    }).join('') : '<div class="text-xs text-light" style="padding:8px 0">今天还没有计划，下面加一个吧～</div>';
 
     el.innerHTML = `
       <div class="card" style="background:linear-gradient(135deg,#FF6B6B,#C4A7E7); color:#fff">
-        <div class="text-sm" style="opacity:.85">骰子页</div>
-        <div class="font-bold mt-1" style="font-size:18px">双十面骰：先掷个位，再掷十位</div>
-        <div class="text-xs mt-1" style="opacity:.85">十位 = 选哪个任务，个位 = 做多少（真实量）</div>
+        <div class="text-sm" style="opacity:.85">今日计划</div>
+        <div class="font-bold mt-1" style="font-size:18px">做完打勾 → 再自己掷骰领奖励</div>
+        <div class="text-xs mt-1" style="opacity:.85">≥15 分钟的任务完成才能掷骰；奖励按"分钟÷15"缩放，做多久发多少</div>
+        <div style="margin-top:8px">${Progress.progressBar(pct, true)}</div>
+        <div class="text-xs mt-1" style="opacity:.85">已专注 ${completedMin} 分钟${rollsLeft ? ' · 还可掷骰 ' + rollsLeft + ' 次 🎲' : ''}</div>
       </div>
 
-      <div class="flex gap-3" style="justify-content:center; margin:16px 0">
-        <div class="dice-face" style="font-size:40px">${ones === null ? '–' : ones}</div>
-        <div class="dice-face" style="font-size:40px">${tens === null ? '–' : tens}</div>
-      </div>
-      <div class="flex gap-3">
-        <button class="btn btn-primary" style="flex:1" onclick="Views._rollDice('ones')">🎲 掷个位</button>
-        <button class="btn btn-primary" style="flex:1" onclick="Views._rollDice('tens')">🎲 掷十位</button>
+      <div class="card" style="margin-top:12px">
+        <div class="card-title" style="margin:0 0 8px">➕ 添加今日任务</div>
+        <input id="tp-text" class="form-input" placeholder="今天要做什么？（如：背德语单词 / 跑个步）">
+        <div class="flex gap-2 mt-2">
+          <select id="tp-dur" class="form-input" style="flex:1">
+            <option value="5">≤15分钟（仅进度·无奖励）</option>
+            <option value="15">15分钟（可掷骰）</option>
+            <option value="30" selected>30分钟</option>
+            <option value="45">45分钟</option>
+            <option value="60">60分钟+</option>
+          </select>
+          <button class="btn btn-primary" onclick="Views._todayAdd()">添加</button>
+        </div>
+        <button class="btn btn-secondary btn-sm mt-2" style="width:100%" onclick="Views._todayEstimate()">🤖 让 AI 估算时长</button>
       </div>
 
-      ${resultHTML}
-
-      <div class="section-title" style="margin-top:16px">今日任务池（十位对应序号）</div>
-      <div class="card">${poolHTML}</div>
+      <div class="section-title" style="margin-top:16px">今日清单（${tp.items.length}）</div>
+      ${itemsHTML}
     `;
   },
 
-  _dicePool() {
-    const pool = [];
-    const plans = (Store.data.plans && Store.data.plans.levels) || [];
-    plans.forEach(lvl => (lvl.categories || []).forEach(cat => (cat.branches || []).forEach(br => {
-      pool.push({ name: br.name, catName: cat.name });
-    })));
-    const focus = (Store.data.aiCharacter && Store.data.aiCharacter.dailyFocus && Store.data.aiCharacter.dailyFocus.items) || [];
-    focus.forEach(f => pool.push({ name: f, catName: '今日重点' }));
-    return pool.slice(0, 9);
+  _todayNewId() {
+    return 'tp_' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
   },
 
-  _diceUnitRange(name) {
-    const n = name || '';
-    if (/单词|背|词汇|记忆/.test(n)) return { unit: '个', min: 1, max: 10 };
-    if (/跑步|跑|运动|锻炼|健身|瑜伽|拉伸/.test(n)) return { unit: '分钟', min: 5, max: 30 };
-    if (/阅读|读书|看|文献/.test(n)) return { unit: '页', min: 1, max: 15 };
-    if (/德语|外语|英语/.test(n)) return { unit: '分钟', min: 5, max: 25 };
-    if (/写作|写|日记|笔记|论文/.test(n)) return { unit: '字', min: 50, max: 500 };
-    if (/冥想|正念/.test(n)) return { unit: '分钟', min: 3, max: 15 };
-    return { unit: '个', min: 1, max: 10 };
-  },
-
-  _rollDice(which) {
-    Views._dice = Views._dice || { ones: null, tens: null };
-    Views._dice[which] = Math.floor(Math.random() * 10);
-    Views.dice(document.getElementById('main-content'));
-  },
-
-  _diceRollReset() {
-    Views._dice = { ones: null, tens: null };
-    Views.dice(document.getElementById('main-content'));
-  },
-
-  _saveDice(task, amount, unit) {
-    const today = Utils.todayStr();
-    Store.data.dailyDice = { date: today, rolled: true, task: task, amount: amount, unit: unit, ones: (Views._dice || {}).ones, tens: (Views._dice || {}).tens };
+  _todayAdd() {
+    const text = (document.getElementById('tp-text') || {}).value;
+    const dur = parseInt((document.getElementById('tp-dur') || {}).value, 10) || 30;
+    if (!text || !text.trim()) { Utils.toast('先写点什么吧', 'error'); return; }
+    const tp = Game.ensureToday();
+    tp.items.push({
+      id: this._todayNewId(), text: text.trim(), durMin: dur,
+      reward: dur >= 15, done: false, rolled: false, rewardResult: null, skipped: false, skipReason: ''
+    });
     Store.save();
-    Utils.toast('已存为今日任务 ✅', 'success');
+    Views.dice(document.getElementById('main-content'));
+  },
+
+  async _todayEstimate() {
+    const text = (document.getElementById('tp-text') || {}).value;
+    if (!text || !text.trim()) { Utils.toast('先写任务再让 AI 估', 'error'); return; }
+    if (!AIClient.hasKey()) { Utils.toast('未配置 Key，无法估算，请手动选时长', 'info'); return; }
+    Utils.toast('AI 估算中…', 'info');
+    const est = await Game.estimateTaskDuration(text.trim());
+    if (!est) { Utils.toast('估算失败，请手动选时长', 'error'); return; }
+    const sel = document.getElementById('tp-dur');
+    const v = est <= 10 ? 5 : est <= 22 ? 15 : est <= 37 ? 30 : est <= 52 ? 45 : 60;
+    if (sel) sel.value = String(v);
+    Utils.toast(`AI 估算约 ${est} 分钟${v >= 15 ? '（可掷骰）' : '（＜15分·仅进度）'}`, 'success');
+  },
+
+  _todayToggle(id) {
+    const it = Game.todayItem(id);
+    if (!it) return;
+    it.done = !it.done;
+    Store.save();
+    Views.dice(document.getElementById('main-content'));
+  },
+
+  _todayRoll(id) {
+    const it = Game.todayItem(id);
+    if (!it || it.rolled || !it.done || !it.reward || it.skipped) return;
+    const res = Game.rollReward(it.durMin);
+    it.rolled = true;
+    it.rewardResult = res;
+    Store.save();
+    Utils.toast(`🎲 掷骰！游戏币+${res.coins} 行动点+${res.ap}${res.leveled ? ' · 升级 Lv' + res.level + '!' : ''}`, 'success');
+    Views.dice(document.getElementById('main-content'));
+  },
+
+  _todaySkip(id) {
+    const it = Game.todayItem(id);
+    if (!it) return;
+    Utils.modal('放弃这个任务？', `
+      <p class="text-sm">说说为什么今天做不了「${Utils.escape(it.text)}」：</p>
+      <textarea id="skip-reason" class="form-input" rows="3" placeholder="如：突然发烧了 / 老板临时安排加班"></textarea>
+      <button class="btn btn-primary btn-block mt-3" onclick="Views._todaySubmitSkip('${id}')">提交</button>
+      <button class="btn btn-secondary btn-block mt-2" onclick="Utils.closeModal()">再想想</button>
+    `);
+  },
+
+  async _todaySubmitSkip(id) {
+    const it = Game.todayItem(id);
+    if (!it) { Utils.closeModal(); return; }
+    const reason = ((document.getElementById('skip-reason') || {}).value || '').trim();
+    if (!reason) { Utils.toast('请先填理由', 'error'); return; }
+    let ok = true; // 无 Key 时默认允许用户诚实跳过
+    if (AIClient.hasKey()) {
+      try {
+        const r = await AIClient.callChat(
+          [{ role: 'user', content: `用户今日计划任务是「${it.text}」，理由是「${reason}」所以无法完成。请判断这个理由是否真实且不可抗拒（如生病、突发紧急事件）。只回复JSON：{"skip":true} 或 {"skip":false}，不要任何解释。` }],
+          { system: '你是严格的借口审查官，只有真实不可抗拒的理由才允许跳过，水理由一律 false。', temperature: 0.2, maxTokens: 40 }
+        );
+        const m = (r || '').match(/\{[\s\S]*\}/);
+        if (m) { const j = JSON.parse(m[0]); ok = !!j.skip; }
+      } catch (e) { /* 网络异常则保守允许跳过并记录理由 */ }
+    }
+    it.skipReason = reason;
+    if (ok) {
+      it.skipped = true;
+      it.done = true;
+      Utils.closeModal();
+      Utils.toast('已跳过，本次无奖励（理由已记录）', 'info');
+    } else {
+      it.done = false;
+      Utils.closeModal();
+      Utils.toast('AI 认为理由不充分，这个任务还是得完成哦（已记录你的说明）', 'warning');
+    }
+    Store.save();
+    Views.dice(document.getElementById('main-content'));
+  },
+
+  _todayRemove(id) {
+    const tp = Game.ensureToday();
+    tp.items = tp.items.filter(i => i.id !== id);
+    Store.save();
     Views.dice(document.getElementById('main-content'));
   },
 
@@ -2762,8 +2870,6 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
       } else {
         Utils.toast('已记录（未配置 Key：登记暂未计入进度。去设置填 DeepSeek Key 后可自动归类）', 'info');
       }
-      const rw = Game.award({ exp: 20 });
-      Utils.toast(`🎲 任务完成！游戏币+${rw.coins}（d6=${rw.d6}） 行动点+1${rw.leveled ? ' · 升级 Lv' + rw.level + '!' : ''}`, 'success');
     }
 
     Store.save();
@@ -5299,9 +5405,7 @@ ${profile || '（未填写）'}
     Store.save();
 
     this.aiTip = '';
-    Utils.toast(`完成「${task.taskName}」！🎉`, 'success');
-    const rw = Game.award({ exp: 30 });
-    Utils.toast(`🎲 游戏币+${rw.coins} 行动点+1${rw.leveled ? ' · 升级 Lv' + rw.level + '!' : ''}`, 'success');
+    Utils.toast(`完成「${task.taskName}」！🎉 去「今日」页勾选并掷骰领奖励吧`, 'success');
 
     // 切到下一个任务
     const remaining = this.getIncompleteTasks();
