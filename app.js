@@ -601,7 +601,7 @@ const Router = {
     document.querySelectorAll('.nav-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.view === view);
     });
-    const titles = { dashboard: '概览', profile: '个人信息', plans: '计划体系', daily: '每日登记', companion: '陪伴', settings: '设置', stats: '数值', dice: '今日' };
+    const titles = { dashboard: '概览', execute: '计划与执行', profile: '个人信息', plans: '计划体系', daily: '每日登记', companion: '陪伴', settings: '设置', stats: '数值', dice: '今日' };
     document.getElementById('page-title').textContent = titles[view] || '';
     this.render();
   },
@@ -618,6 +618,7 @@ const Router = {
       case 'settings': Views.settings(main); break;
       case 'stats': Views.stats(main); break;
       case 'dice': Views.dice(main); break;
+      case 'execute': Views.execute(main); break;
     }
   },
 };
@@ -6503,6 +6504,40 @@ const App = {
       Utils.toast('请使用浏览器的"添加到主屏幕"功能安装', 'warning');
     }
   },
+};
+
+/* ========== 计划与执行中枢页（侧栏整合入口） ========== */
+Views.execute = function (el) {
+  const tp = Progress.todayPlanProgress();
+  const cards = [
+    { icon: '🎲', title: '今日任务', desc: '清单勾选 + 手动掷骰领奖', view: 'dice' },
+    { icon: '📝', title: '补记登记', desc: '事后补记学习/工作，AI 归类计进度', view: 'daily' },
+    { icon: '🎯', title: '聚焦执行', desc: '卡住时 AI 拆碎屑步逐步做', view: 'focus' },
+    { icon: '⚡', title: '习惯杠杆', desc: '剂量锚打卡 + 出国时间线', view: 'habit' },
+    { icon: '🌳', title: '编辑计划', desc: '层级/类别/分支/任务增删改', view: 'plans' },
+    { icon: '👤', title: '个人信息', desc: '录入画像，触发 AI 调整计划', view: 'profile' },
+  ];
+  const cardsHTML = cards.map(c => `
+    <div class="card" style="cursor:pointer; border-left:4px solid var(--c-teal)" onclick="Router.navigate('${c.view}')">
+      <div class="flex items-center gap-3">
+        <div style="font-size:28px">${c.icon}</div>
+        <div style="flex:1">
+          <div class="font-bold">${c.title}</div>
+          <div class="text-sm text-light">${c.desc}</div>
+        </div>
+        <span style="font-size:18px; color:var(--text-light)">›</span>
+      </div>
+    </div>`).join('');
+  el.innerHTML = `
+    <div class="card" style="background:linear-gradient(135deg,#FF6B6B,#C4A7E7); color:#fff">
+      <div class="text-sm" style="opacity:.85">今日计划进度</div>
+      <div class="font-bold mt-1" style="font-size:20px">已专注 ${tp.completedMin} / ${tp.target} 分钟</div>
+      <div style="margin-top:8px">${Progress.progressBar(tp.pct, true)}</div>
+      <div class="text-xs mt-1" style="opacity:.85">${tp.done}/${tp.total} 项已勾${tp.rollsLeft ? ' · 还可掷骰 ' + tp.rollsLeft + ' 次 🎲' : ''}</div>
+    </div>
+    <div class="section-title" style="margin-top:16px">计划与执行</div>
+    ${cardsHTML}
+  `;
 };
 
 // 启动
