@@ -2874,7 +2874,7 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
     if (isPeriod) {
       const [sh, sm] = startVal.split(':').map(Number);
       const [eh, em2] = endVal.split(':').map(Number);
-      let mins = (eh2 * 60 + em2) - (sh * 60 + sm);
+      let mins = (eh * 60 + em2) - (sh * 60 + sm);
       if (mins < 0) mins += 24 * 60;
       activity = { type, mode: 'period', time: timeVal, startTime: startVal, endTime: endVal, duration: mins, name, note, desc };
     } else {
@@ -2904,6 +2904,7 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
 
     Store.save();
     Utils.closeModal();
+    Router.render();  // 始终刷新当前视图（如登记页），使新记录立即显示
 
     if (Companion.hasCharacter() && AIClient.hasKey()) {
       const detail = [labels[type] || type, note].filter(Boolean).join('：');
@@ -2911,8 +2912,6 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
         ? '（快捷记录）' + detail + '，' + startVal + '到' + endVal
         : '（快捷记录）' + detail;
       Views._notifyCompanion(activityDesc);
-    } else {
-      Router.render();
     }
   },
 
