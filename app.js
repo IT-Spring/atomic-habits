@@ -619,6 +619,8 @@ const Router = {
       case 'stats': Views.stats(main); break;
       case 'dice': Views.dice(main); break;
       case 'execute': Views.execute(main); break;
+      case 'habit': Views.habit(main); break;
+      case 'focus': Views.focus(main); break;
     }
   },
 };
@@ -6436,6 +6438,8 @@ const App = {
 
   init() {
     Store.init();
+    seedHabitData();
+    seedFocusData();
     this.bindNav();
     this.registerSW();
     this.bindInstallPrompt();
@@ -6539,6 +6543,503 @@ Views.execute = function (el) {
     ${cardsHTML}
   `;
 };
+
+/* ============================================================
+ * 习惯层（剂量锚 · 时间线 · 升级提醒）与 单步聚焦模块
+ * 原 habit.js / focus.js，已并入主文件以减少维护面
+ * ============================================================ */
+
+/* ---------- 习惯：默认数据 ---------- */
+const HABIT_DEFAULTS = {
+  levers: [
+    { id: 'sleep',   name: '睡眠断电', anchor: '阿戈美拉汀 9:30 + 小夜灯，关机键', freq: 'daily' },
+    { id: 'env',     name: '环境收面', anchor: '每天只收 1 个可见面（床边/书桌/门口轮换）', freq: 'daily' },
+    { id: 'yogurt',  name: '增重·酸奶', anchor: '每天 1 杯', freq: 'daily' },
+    { id: 'iron',    name: '补铁·多闹钟', anchor: '药+铁剂+VC 放床头，设多个闹钟', freq: 'daily' },
+    { id: 'spend',   name: '支出≤1500/月', anchor: '每日看余额，周结余奖赏', freq: 'weekly' },
+    { id: 'exercise',name: '运动·哑铃', anchor: '最低 1 组，不追求量', freq: 'daily' },
+    { id: 'german',  name: '德语降门槛', anchor: '1 个语法点 + 30min Anki', freq: 'daily' },
+    { id: 'rest',    name: '休息锚', anchor: '固定放松时段，看动漫/听歌', freq: 'daily' },
+  ],
+  items: [
+    { name: '酸奶', place: '冰箱门' },
+    { name: '铁剂+VC', place: '床头伸手够到' },
+    { name: '小夜灯', place: '床头' },
+    { name: '哑铃', place: '床边' },
+    { name: '德语书签', place: '书桌' },
+    { name: '垃圾桶', place: '门口' },
+  ],
+  evidence: [],
+};
+
+const TIMELINE_DEFAULTS = [
+  { id: 'a2end',   name: 'A2 课结课（莱茵春天）',    date: '2026-08-28', note: '7.15-8.28 直播 周一三五日 19:00-21:30' },
+  { id: 'b1start', name: 'B1 网课开（莱茵春天晚班）', date: '2026-09-11', note: '周一三五日，可连报优惠' },
+  { id: 'b1end',   name: 'B1 课结课',               date: '2026-11-02', note: '' },
+  { id: 'b1sign',  name: 'B1 考试报名起',           date: '2026-11-11', note: '备好 2000 元' },
+  { id: 'b1exam',  name: '歌德 B1 考试（北京）',      date: '2026-12-03', note: '单点故障！考听说读写四项，需退路' },
+  { id: 'grade',   name: '出成绩+预约签证+准备材料',  date: '2026-12-31', note: '' },
+  { id: 'visa',    name: '拿签证',                 date: '2027-01-10', note: '' },
+  { id: 'germany', name: '到亚琛，进合作语言班 B2.1', date: '2027-03-01', note: '' },
+  { id: 'b2c1',    name: 'B2.1→C1.2 密集班',         date: '2027-06-01', note: '630欧/月，每月一级' },
+  { id: 'testdaf', name: 'TestDaF / DSH（C1）',       date: '2027-06-15', note: 'C1 即可，非 C2' },
+  { id: 'apply',   name: '申请 2027 冬季学期',        date: '2027-07-15', note: '' },
+  { id: 'enroll',  name: '入学（冬季学期）',          date: '2027-10-01', note: '' },
+];
+
+function seedHabitData() {
+  if (!Store.data.habits) {
+    const d = JSON.parse(JSON.stringify(HABIT_DEFAULTS));
+    d.levers.forEach(l => l.done = {});
+    Store.data.habits = d;
+  } else {
+    if (!Store.data.habits.levers) Store.data.habits.levers = [];
+    if (!Store.data.habits.items) Store.data.habits.items = [];
+    if (!Store.data.habits.evidence) Store.data.habits.evidence = [];
+    Store.data.habits.levers.forEach(l => { if (!l.done) l.done = {}; });
+  }
+  if (!Store.data.timeline) Store.data.timeline = JSON.parse(JSON.stringify(TIMELINE_DEFAULTS));
+  if (Store.data.userAvatar === undefined) Store.data.userAvatar = '';
+  Store.save();
+}
+
+/* ---------- 工具 ---------- */
+function timelineHTML() {
+  const tl = Store.data.timeline || [];
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const nodes = tl.map(n => {
+    const d = new Date(n.date + 'T00:00:00');
+    const days = Math.round((d - today) / 86400000);
+    const cls = days < 0 ? 'tl-past' : (days <= 7 ? 'tl-soon' : 'tl-normal');
+    return `<div class="tl-node ${cls}">
+      <div><div class="tl-name">${Utils.escape(n.name)}</div><div class="tl-date">${n.date}</div></div>
+      <div class="tl-days">${days >= 0 ? days + ' 天' : '已过去'}</div>
+    </div>`;
+  }).join('');
+  return `<div class="card timeline-card"><div class="card-title">🗓️ 关键时间线（倒计时）</div><div class="tl-list">${nodes}</div></div>`;
+}
+
+/* ---------- 习惯视图 ---------- */
+Views.habit = function (el) {
+  document.getElementById('page-title').textContent = '习惯';
+  const h = Store.data.habits;
+  const today = Utils.todayStr();
+  const doneCount = h.levers.filter(l => l.done && l.done[today]).length;
+
+  const levers = h.levers.map(l => {
+    const done = !!(l.done && l.done[today]);
+    return `<div class="lever-item ${done ? 'lever-done' : ''}" onclick="Views._habitToggle('${l.id}')">
+      <div class="lever-check">${done ? '✅' : '⬜'}</div>
+      <div class="lever-body"><div class="lever-name">${Utils.escape(l.name)}</div><div class="lever-anchor">${Utils.escape(l.anchor)}</div></div>
+    </div>`;
+  }).join('');
+
+  const items = h.items.map(it =>
+    `<div class="item-row"><span class="item-name">${Utils.escape(it.name)}</span><span class="item-place">📍 ${Utils.escape(it.place)}</span></div>`
+  ).join('');
+
+  const ev = (h.evidence || []).slice(0, 8).map(e =>
+    `<div class="evidence-thumb"><img src="${e.img}" alt=""><div class="evidence-date">${e.date}</div></div>`
+  ).join('');
+
+  el.innerHTML = `
+    <div class="dashboard-greeting">习惯系统 🎯</div>
+    <div class="dashboard-subtitle">底层行为改造 · 剂量锚 · 不挂钟</div>
+    ${timelineHTML()}
+    <div class="card">
+      <div class="card-title">🎯 今日最低剂量 <span class="progress-percent">${doneCount}/${h.levers.length}</span></div>
+      <div class="lever-list">${levers}</div>
+      <div class="text-sm text-light mt-2">点一下即记，不用多想。漏了补点也行。</div>
+    </div>
+    <div class="card">
+      <div class="card-title">📦 杠杆物品（固定可见处）</div>
+      <div class="item-list">${items}</div>
+    </div>
+    <div class="card">
+      <div class="card-title">📸 证据留证</div>
+      <div class="evidence-grid">${ev || '<div class="empty-state-text">还没有留证，拍一张吧</div>'}</div>
+      <label class="btn btn-secondary btn-sm mt-2" style="display:inline-block">＋ 拍照留证
+        <input type="file" accept="image/*" capture="environment" id="habit-photo" style="display:none" onchange="Views._habitPhoto(event)">
+      </label>
+    </div>
+  `;
+};
+
+Views._habitToggle = function (id) {
+  const h = Store.data.habits;
+  const l = h.levers.find(x => x.id === id);
+  if (!l) return;
+  const t = Utils.todayStr();
+  if (!l.done) l.done = {};
+  l.done[t] = !l.done[t];
+  Store.save();
+  Views.habit(document.getElementById('main-content'));
+};
+
+Views._habitPhoto = function (e) {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const max = 480;
+      const scale = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * scale);
+      c.height = Math.round(img.height * scale);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      const data = c.toDataURL('image/jpeg', 0.7);
+      if (!Store.data.habits.evidence) Store.data.habits.evidence = [];
+      Store.data.habits.evidence.unshift({ date: Utils.todayStr(), img: data, note: '' });
+      Store.save();
+      Views.habit(document.getElementById('main-content'));
+    };
+    img.src = reader.result;
+  };
+  reader.readAsDataURL(file);
+  e.target.value = '';
+};
+
+/* ---------- 升级：提醒弹窗（选择 + 简答 + 跳过） ---------- */
+Views.reminderLog = function (type, note) {
+  const today = Utils.todayStr();
+  if (!Store.data.dailyLogs[today]) Store.data.dailyLogs[today] = { activities: [] };
+  const log = Store.data.dailyLogs[today];
+  if (!log.activities) log.activities = [];
+  const now = new Date();
+  const t = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  log.activities.push({ type, mode: 'point', time: t, desc: note || '' });
+  Store.save();
+  Utils.toast('已记录 ✓');
+  const badge = document.getElementById('reminder-badge');
+  if (badge) badge.style.display = 'none';
+};
+
+Reminder.showBanner = function () {
+  const existing = document.querySelector('.reminder-popup');
+  if (existing) existing.remove();
+  const p = document.createElement('div');
+  p.className = 'reminder-popup';
+  p.innerHTML = `
+    <div class="reminder-popup-head">⏰ 该记录了 · 你刚在做啥？</div>
+    <div class="reminder-chips">
+      <button class="reminder-chip" data-t="sleep">😴 睡</button>
+      <button class="reminder-chip" data-t="meal">🍽️ 吃</button>
+      <button class="reminder-chip" data-t="study">📚 学</button>
+      <button class="reminder-chip" data-t="work">💻 竞</button>
+      <button class="reminder-chip" data-t="exercise">🏃 动</button>
+      <button class="reminder-chip" data-t="rest">☕ 休</button>
+      <button class="reminder-chip" data-t="play">🎮 玩</button>
+      <button class="reminder-chip" data-t="custom">✏️ 其他</button>
+    </div>
+    <input class="form-input reminder-note" id="reminder-note" placeholder="补充说明（可选）">
+    <div class="reminder-popup-foot">
+      <button class="btn btn-ghost btn-sm" id="reminder-skip">跳过</button>
+      <button class="btn btn-primary btn-sm" id="reminder-ok">记一下</button>
+    </div>`;
+  document.body.appendChild(p);
+  const note = () => (document.getElementById('reminder-note').value || '').trim();
+  p.querySelectorAll('.reminder-chip').forEach(b => {
+    b.onclick = () => { Views.reminderLog(b.dataset.t, note()); p.remove(); };
+  });
+  document.getElementById('reminder-ok').onclick = () => {
+    const n = note();
+    Views.reminderLog(n ? 'custom' : 'custom', n || '记录');
+    p.remove();
+  };
+  document.getElementById('reminder-skip').onclick = () => p.remove();
+  setTimeout(() => { if (p.parentElement) p.remove(); }, 60000);
+};
+
+/* ---------- 把时间线挂到概览底部 ---------- */
+const _origDashboard = Views.dashboard.bind(Views);
+Views.dashboard = function (el) {
+  _origDashboard(el);
+  if (Store.data.timeline && Store.data.timeline.length) {
+    el.insertAdjacentHTML('beforeend', timelineHTML());
+  }
+};
+
+/* ---------- 聚焦：数据播种 ---------- */
+function seedFocusData() {
+  if (!Store.data.focus) {
+    Store.data.focus = { current: null, templates: [] };
+    Store.save();
+  } else {
+    if (!Store.data.focus.current) Store.data.focus.current = null;
+    if (!Store.data.focus.templates) Store.data.focus.templates = [];
+  }
+}
+
+/* ---------- AI 系统提示 ---------- */
+function focusSystem() {
+  const c = Store.data.aiCharacter || {};
+  const hasChar = c && c.name;
+  if (hasChar) {
+    let s = `你是「${c.name}」，${c.aiNickname || c.name}是用户对你的称呼。\n`;
+    if (c.characterDesc) s += `你的性格/职责：${c.characterDesc}\n`;
+    if (c.worldview) s += `世界观：${c.worldview}\n`;
+    if (c.relationship) s += `关系：${c.relationship}\n`;
+    s += `用你的角色口吻说话，中文，简短（1-4句）。\n`;
+    return s;
+  }
+  return `你是一个专注执行教练，用中文简短（1-4句）督促用户。\n`;
+}
+
+/* ---------- 调 AI ---------- */
+function parseSteps(reply) {
+  if (!reply || typeof reply !== 'string') return [];
+  let s = reply.trim();
+  const tryJson = (str) => {
+    try { const j = JSON.parse(str); if (Array.isArray(j)) return j.map(x => String(x).trim()).filter(Boolean); } catch (e) {}
+    return null;
+  };
+  let arr = tryJson(s);
+  if (!arr) {
+    const m = s.match(/\[[\s\S]*\]/);
+    if (m) arr = tryJson(m[0]);
+  }
+  if (arr) return arr.slice(0, 10);
+  return s.split(/\n+/).map(x => x.replace(/^[\d\.\-\*\s`]+/, '').trim()).filter(Boolean).slice(0, 10);
+}
+
+async function focusBreakGoal(goal) {
+  try {
+    const system = focusSystem() + `
+把下面这个目标拆成"碎屑级"可执行小步。要求：
+- 每步极具体、可立即动手（如"打开文档写下标题"），不要解释
+- 不超过 8 步
+- 严格只输出 JSON 数组字符串：["步骤1","步骤2",...]`;
+    const reply = await AIClient.callChat(
+      [{ role: 'user', content: `目标：${goal}\n请拆成碎屑级步骤，只输出 JSON 数组。` }],
+      { system, temperature: 0.9, maxTokens: 800 }
+    );
+    return parseSteps(reply);
+  } catch (e) { console.error('focusBreakGoal', e); return [goal]; }
+}
+
+async function focusBreakStep(stepText, difficulty) {
+  try {
+    const system = focusSystem() + `
+把下面这个"卡住的步骤"拆成 2-4 个更小的子步骤，输出 JSON 数组字符串：["子步1","子步2",...]。不要解释。`;
+    const reply = await AIClient.callChat(
+      [{ role: 'user', content: `当前步骤："${stepText}"\n遇到问题：${difficulty}\n请把这一步拆得更小，只输出 JSON 数组。` }],
+      { system, temperature: 0.9, maxTokens: 600 }
+    );
+    return parseSteps(reply);
+  } catch (e) { console.error('focusBreakStep', e); return [difficulty]; }
+}
+
+async function focusCharLine(stepText) {
+  try {
+    const reply = await AIClient.callChat(
+      [{ role: 'user', content: `用户正在执行："${stepText}"。给一句推动 ta 的话。` }],
+      { system: focusSystem() + `\n用你的口吻给用户一句极短催促/鼓励（1-2句，中文），不要解释，不要加引号。`, temperature: 0.95, maxTokens: 120 }
+    );
+    return (reply && reply.trim()) ? reply.trim() : '专注这一步，做完就离目标近一点。';
+  } catch (e) { return '专注这一步，做完就离目标近一点。'; }
+}
+
+/* ---------- session 级倒计时 ---------- */
+const focusTimer = { id: null, remaining: 1500, running: false };
+function fmtTime(s) { s = Math.max(0, s); const m = Math.floor(s / 60), r = s % 60; return `${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`; }
+function focusTimerStart() {
+  if (focusTimer.running) return;
+  focusTimer.running = true;
+  focusTimer.id = setInterval(() => {
+    focusTimer.remaining--;
+    const el = document.getElementById('focus-timer');
+    if (el) el.textContent = fmtTime(focusTimer.remaining);
+    if (focusTimer.remaining <= 0) { clearInterval(focusTimer.id); focusTimer.running = false; }
+  }, 1000);
+}
+function focusTimerPause() { if (focusTimer.id) clearInterval(focusTimer.id); focusTimer.running = false; }
+function focusTimerReset() { focusTimerPause(); focusTimer.remaining = 1500; const el = document.getElementById('focus-timer'); if (el) el.textContent = fmtTime(1500); }
+
+/* ---------- 全局 Focus ---------- */
+const Focus = {
+  async start() {
+    const goal = (document.getElementById('focus-goal')?.value || '').trim();
+    if (!goal) { Utils.toast('先写个目标'); return; }
+    Utils.toast('AI 拆解中…');
+    const steps = AIClient.hasKey() ? await focusBreakGoal(goal) : [goal];
+    const list = steps.length ? steps : [goal];
+    Store.data.focus.current = {
+      goal,
+      steps: list.map(t => ({ id: Store.uid(), text: t, status: 'todo', moodBefore: null, moodAfter: null })),
+      idx: 0, startedAt: Date.now()
+    };
+    Store.save(); focusTimerReset(); Views.focus(document.getElementById('main-content')); this.charLine();
+  },
+  useTemplate(i) {
+    const t = Store.data.focus.templates[i];
+    if (!t) return;
+    Store.data.focus.current = {
+      goal: t.goal,
+      steps: t.steps.map(t2 => ({ id: Store.uid(), text: t2, status: 'todo', moodBefore: null, moodAfter: null })),
+      idx: 0, startedAt: Date.now()
+    };
+    Store.save(); focusTimerReset(); Views.focus(document.getElementById('main-content')); this.charLine();
+  },
+  deleteTemplate(i) {
+    Store.data.focus.templates.splice(i, 1);
+    Store.save(); Views.focus(document.getElementById('main-content'));
+  },
+  completeStep() {
+    const cur = Store.data.focus.current; if (!cur) return;
+    const step = cur.steps[cur.idx];
+    if (step && !step.moodAfter) step.moodAfter = { energy: '中', mood: '😐' };
+    step.status = 'done';
+    if (cur.idx < cur.steps.length - 1) { cur.idx++; }
+    Store.save(); Views.focus(document.getElementById('main-content')); this.charLine();
+  },
+  skipStep() {
+    const cur = Store.data.focus.current; if (!cur) return;
+    cur.steps[cur.idx].status = 'skip';
+    if (cur.idx < cur.steps.length - 1) { cur.idx++; }
+    Store.save(); Views.focus(document.getElementById('main-content')); this.charLine();
+  },
+  async difficulty() {
+    const cur = Store.data.focus.current; if (!cur) return;
+    const diff = (document.getElementById('focus-diff')?.value || '').trim();
+    if (!diff) { Utils.toast('写一下遇到的困难'); return; }
+    Utils.toast('AI 再拆中…');
+    const subs = AIClient.hasKey() ? await focusBreakStep(cur.steps[cur.idx].text, diff) : [diff];
+    const newSteps = subs.map(t => ({ id: Store.uid(), text: t, status: 'todo', moodBefore: null, moodAfter: null }));
+    cur.steps.splice(cur.idx + 1, 0, ...newSteps);
+    Store.save(); Views.focus(document.getElementById('main-content')); this.charLine();
+  },
+  setMoodBefore(energy, mood) {
+    const cur = Store.data.focus.current; if (!cur) return;
+    const step = cur.steps[cur.idx];
+    if (step) { step.moodBefore = { energy, mood }; Store.save(); }
+    const box = document.getElementById('mood-before-box'); if (box) box.style.display = 'none';
+  },
+  setMoodAfter(energy, mood) {
+    const cur = Store.data.focus.current; if (!cur) return;
+    const step = cur.steps[cur.idx];
+    if (step) { step.moodAfter = { energy, mood }; Store.save(); }
+    const box = document.getElementById('mood-after-box'); if (box) box.style.display = 'none';
+  },
+  saveTemplate() {
+    const cur = Store.data.focus.current; if (!cur) return;
+    const name = (document.getElementById('focus-tpl-name')?.value || '').trim();
+    if (!name) { Utils.toast('给模板起个名'); return; }
+    Store.data.focus.templates.push({ name, goal: cur.goal, steps: cur.steps.map(s => s.text) });
+    Store.save(); Utils.toast('已存为模板 ✓'); Views.focus(document.getElementById('main-content'));
+  },
+  newGoal() { Store.data.focus.current = null; Store.save(); focusTimerReset(); Views.focus(document.getElementById('main-content')); },
+  async charLine() {
+    const cur = Store.data.focus.current; if (!cur) return;
+    const step = cur.steps[cur.idx]; if (!step) return;
+    const el = document.getElementById('focus-char-line'); if (!el) return;
+    el.textContent = '…';
+    if (AIClient.hasKey()) {
+      const line = await focusCharLine(step.text);
+      if (el) el.textContent = line;
+    } else {
+      el.textContent = '专注这一步，做完就离目标近一点。';
+    }
+  },
+  timerStart() { focusTimerStart(); },
+  timerPause() { focusTimerPause(); },
+  timerReset() { focusTimerReset(); },
+  toggleDiff() { const b = document.getElementById('diff-box'); if (b) b.style.display = b.style.display === 'none' ? 'block' : 'none'; },
+};
+
+/* ---------- 聚焦视图 ---------- */
+Views.focus = function (el) {
+  document.getElementById('page-title').textContent = '聚焦';
+  const f = Store.data.focus || { current: null, templates: [] };
+
+  if (!f.current) {
+    const tpls = (f.templates || []).map((t, i) => `
+      <div class="tpl-item">
+        <span class="tpl-name">${Utils.escape(t.name)}</span>
+        <span class="tpl-sub">${t.steps.length} 步</span>
+        <button class="btn btn-sm btn-secondary" onclick="Focus.useTemplate(${i})">套用</button>
+        <button class="btn btn-sm btn-ghost" onclick="Focus.deleteTemplate(${i})">删</button>
+      </div>`).join('');
+    el.innerHTML = `
+      <div class="dashboard-greeting">单步聚焦 🎯</div>
+      <div class="dashboard-subtitle">一次只做当前这一步 · 滚雪球式推进</div>
+      <div class="card">
+        <div class="card-title">🎯 输入一个目标</div>
+        <textarea id="focus-goal" class="form-input" rows="3" placeholder="例如：复习今天直播课的语法 / 把屋子收一下 / 写竞赛报告"></textarea>
+        <button class="btn btn-primary btn-block mt-2" onclick="Focus.start()">🤖 AI 拆解并开始</button>
+        <div class="text-sm text-light mt-2">没填 API Key 也能用：直接把目标当唯一一步开始。</div>
+      </div>
+      ${tpls ? `<div class="card"><div class="card-title">📋 我的 SOP 模板</div>${tpls}</div>` : ''}
+    `;
+    return;
+  }
+
+  const cur = f.current;
+  const step = cur.steps[cur.idx];
+  const total = cur.steps.length;
+  const doneCount = cur.steps.filter(s => s.status === 'done').length;
+  const allDone = cur.steps.every(s => s.status === 'done');
+
+  const mb = (e, m) => `<button class="mood-btn" onclick="Focus.setMoodBefore('${e}','${m}')">${m} ${e}</button>`;
+  const ma = (e, m) => `<button class="mood-btn" onclick="Focus.setMoodAfter('${e}','${m}')">${m} ${e}</button>`;
+
+  if (allDone) {
+    el.innerHTML = `
+      <div class="dashboard-greeting">🎉 完成！</div>
+      <div class="card">
+        <div class="card-title">目标达成：${Utils.escape(cur.goal)}</div>
+        <div class="text-sm">共 ${total} 步，已完成 ${doneCount} 步。</div>
+        <div class="mt-2"><input id="focus-tpl-name" class="form-input" placeholder="给这套步骤起个名（存为 SOP 模板）"></div>
+        <button class="btn btn-primary btn-block mt-2" onclick="Focus.saveTemplate()">💾 保存为模板</button>
+        <button class="btn btn-ghost btn-block mt-2" onclick="Focus.newGoal()">＋ 新目标</button>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="dashboard-greeting">聚焦中 🎯</div>
+    <div class="focus-progress"><div class="focus-progress-bar" style="width:${Math.round(cur.idx / total * 100)}%"></div></div>
+    <div class="text-sm text-light">第 ${cur.idx + 1} / ${total} 步 · 已完成 ${doneCount}</div>
+
+    <div class="card focus-char-card"><div class="focus-char-line" id="focus-char-line">正在生成提醒…</div></div>
+
+    <div class="card focus-step-card">
+      <div class="focus-step-text">${Utils.escape(step.text)}</div>
+      <div class="focus-timer-box">
+        <div class="focus-timer" id="focus-timer">${fmtTime(focusTimer.remaining)}</div>
+        <div class="focus-timer-btns">
+          <button class="btn btn-sm btn-secondary" onclick="Focus.timerStart()">开始</button>
+          <button class="btn btn-sm btn-ghost" onclick="Focus.timerPause()">暂停</button>
+          <button class="btn btn-sm btn-ghost" onclick="Focus.timerReset()">重置</button>
+        </div>
+      </div>
+    </div>
+
+    ${!step.moodBefore ? `<div class="card" id="mood-before-box"><div class="card-title">😶 执行前状态</div>
+      <div class="mood-row">${mb('低', '😞')}${mb('中', '😐')}${mb('高', '😄')}</div></div>` : ''}
+
+    <div class="focus-actions">
+      <button class="btn btn-primary flex-1" onclick="Focus.completeStep()">✅ 确定完成</button>
+      <button class="btn btn-secondary" onclick="Focus.skipStep()">⏭ 跳过</button>
+      <button class="btn btn-secondary" onclick="Focus.toggleDiff()">😣 困难</button>
+    </div>
+
+    <div class="card" id="diff-box" style="display:none">
+      <div class="card-title">😣 遇到什么困难？</div>
+      <textarea id="focus-diff" class="form-input" rows="2" placeholder="写下来，AI 帮这步拆更小"></textarea>
+      <button class="btn btn-primary btn-block mt-2" onclick="Focus.difficulty()">🤖 AI 再拆这一步</button>
+    </div>
+
+    ${!step.moodAfter && step.status === 'done' ? `<div class="card" id="mood-after-box"><div class="card-title">😊 执行后状态</div>
+      <div class="mood-row">${ma('低', '😞')}${ma('中', '😐')}${ma('高', '😄')}</div></div>` : ''}
+
+    <button class="btn btn-ghost btn-block mt-2" onclick="Focus.newGoal()">放弃 / 换目标</button>
+  `;
+  Focus.charLine();
+};
+
+if (typeof window !== 'undefined') window.Focus = Focus;
 
 // 启动
 document.addEventListener('DOMContentLoaded', () => App.init());
