@@ -67,6 +67,7 @@ const Store = {
         manualBonus: {}, coinLedger: []
       },
       todayPlan: { date: '', items: [] }, // 今日计划：{id,text,durMin,reward,done,rolled,rewardResult,skipped,skipReason}
+      dailyRoute: { date: '', items: [] }, // 每日线路完成态：{id,done,skipped,skipReason}（结构在 DAILY_ROUTE 常量）
       versionHistory: [],
       sopTemplates: [],
       settings: {
@@ -136,6 +137,8 @@ const Store = {
     ['con', 'int', 'cha', 'agi', 'wil'].forEach(k => { if (_st.manualBonus[k] === undefined) _st.manualBonus[k] = 0; });
     if (!this.data.todayPlan) this.data.todayPlan = { date: '', items: [] };
     if (!this.data.todayPlan.items) this.data.todayPlan.items = [];
+    if (!this.data.dailyRoute) this.data.dailyRoute = { date: '', items: [] };
+    if (!this.data.dailyRoute.items) this.data.dailyRoute.items = [];
   },
 
   recordVersion(action, detail) {
@@ -6524,8 +6527,138 @@ const App = {
 };
 
 /* ========== 计划与执行中枢页（侧栏整合入口） ========== */
+/* ============================================================
+ * 每日线路（行为锚定 · 不挂钟 · 接今日计划掷骰奖励）
+ * 结构为常量；完成状态按日存 Store.data.dailyRoute{date,items[]}
+ * 勾选完成的奖励任务同步进 todayPlan，复用同一套 Game.rollReward 掷骰
+ * ============================================================ */
+const DAILY_ROUTE = [
+  { id:'med',      label:'两次吃药（早药 8 点附近 · 晚药 21:30 附近）', anchor:'起床 → 吃早药', estMin:0,  rewardMin:0,  type:'habit' },
+  { id:'meal',     label:'吃东西 + 补铁 + 酸奶坚果', anchor:'早药后吃早饭，铁剂+VC 随餐', estMin:0, rewardMin:0, type:'habit' },
+  { id:'de1',      label:'德语第一轮 20min', anchor:'早饭后 · 背单词 / Anki', estMin:20, rewardMin:20, type:'focus' },
+  { id:'replay',   label:'德语回放 1 小时', anchor:'第一轮背单词后', estMin:60, rewardMin:60, type:'focus' },
+  { id:'de2',      label:'德语第二轮 20min', anchor:'回放后 · 自由时段', estMin:20, rewardMin:20, type:'focus' },
+  { id:'exercise', label:'6 分钟锻炼（哑铃在床边）', anchor:'第二轮后', estMin:6, rewardMin:15, type:'focus' },
+  { id:'tidy',     label:'收拾一个小区域', anchor:'锻炼后 · 轮着床边 / 书桌 / 门口', estMin:15, rewardMin:15, type:'focus' },
+  { id:'de3',      label:'德语第三轮 20min', anchor:'下午 / 浮动前', estMin:20, rewardMin:20, type:'focus' },
+  { id:'live',     label:'直播课（莱茵春天 19:00-21:30）', anchor:'19:00 上课', estMin:150, rewardMin:60, type:'focus', conditional:true },
+  { id:'mednight', label:'晚药 + 酸奶坚果', anchor:'21:30 附近 · 小夜灯亮', estMin:0, rewardMin:0, type:'habit' },
+];
+const DAILY_ROUTE_FLOAT = [
+  { id:'de4',     label:'德语多加一轮 20min',         estMin:20, rewardMin:20 },
+  { id:'cook',    label:'做一顿饭',                   estMin:30, rewardMin:30 },
+  { id:'contest', label:'竞赛相关',                   estMin:30, rewardMin:30 },
+  { id:'tidy2',   label:'多收拾一个区域',             estMin:15, rewardMin:15 },
+  { id:'abroad',  label:'出国准备（查中介 · 算费用）', estMin:30, rewardMin:30 },
+];
+const ENV_ANCHORS = [
+  ['药 / 铁剂 + VC', '床头伸手够到'],
+  ['小夜灯', '床头'],
+  ['酸奶', '冰箱门'],
+  ['哑铃', '床边'],
+  ['德语书签', '书桌'],
+  ['垃圾桶', '门口'],
+];
+const ROUTE_ALL = DAILY_ROUTE.concat(DAILY_ROUTE_FLOAT);
+function ROUTE_DEF(id) { return ROUTE_ALL.find(r => r.id === id); }
+function ROUTE_HAS_LIVE() { return [0, 1, 3, 5].includes(new Date().getDay()); } // 周日0 周一1 周三3 周五5
+
+// 每日线路完成态（按日）
+Game.ensureRoute = function () {
+  const d = Store.data;
+  if (!d.dailyRoute) d.dailyRoute = { date: '', items: [] };
+  if (!d.dailyRoute.items) d.dailyRoute.items = [];
+  const t = Utils.todayStr();
+  if (d.dailyRoute.date !== t) d.dailyRoute = { date: t, items: [] };
+  ROUTE_ALL.forEach(r => {
+    if (!d.dailyRoute.items.find(i => i.id === r.id)) {
+      d.dailyRoute.items.push({ id: r.id, done: false, skipped: false, skipReason: '' });
+    }
+  });
+  return d.dailyRoute;
+};
+// 接今日计划：完成态 ↔ todayPlan 联动
+Game.routeTodayId = function (id) { return 'route_' + id; };
+Game.routeLinked = function (id) {
+  return Game.ensureToday().items.find(i => i.id === Game.routeTodayId(id)) || null;
+};
+Game.ensureRouteTodayItem = function (def) {
+  const tp = Game.ensureToday();
+  const lid = Game.routeTodayId(def.id);
+  let it = tp.items.find(i => i.id === lid);
+  if (!it) {
+    it = { id: lid, text: def.label, durMin: def.rewardMin, reward: def.rewardMin >= 15, done: true, rolled: false, rewardResult: null, skipped: false, skipReason: '', fromRoute: true, routeId: def.id };
+    tp.items.push(it);
+  }
+  it.done = true; it.skipped = false; it.reward = def.rewardMin >= 15;
+  it.durMin = def.rewardMin; it.text = def.label; it.fromRoute = true; it.routeId = def.id;
+  return it;
+};
+Game.removeRouteTodayItem = function (id) {
+  const tp = Game.ensureToday();
+  tp.items = tp.items.filter(i => i.id !== Game.routeTodayId(id));
+};
+
 Views.execute = function (el) {
   const tp = Progress.todayPlanProgress();
+  const route = Game.ensureRoute();
+  const stateOf = id => route.items.find(i => i.id === id) || { done: false, skipped: false, skipReason: '' };
+  const hasLive = ROUTE_HAS_LIVE();
+
+  const reqHTML = DAILY_ROUTE.map(def => {
+    if (def.conditional && !hasLive) {
+      return `<div class="card" style="margin-bottom:10px;opacity:.5">
+        <div class="font-bold">${Utils.escape(def.label)}</div>
+        <div class="text-xs text-light">今天无直播课（周一三五日开课）</div>
+      </div>`;
+    }
+    const st = stateOf(def.id);
+    const linked = Game.routeLinked(def.id);
+    const rolled = linked && linked.rolled;
+    const rewardable = def.rewardMin >= 15;
+    let action;
+    if (st.skipped) action = `<span class="text-xs text-light">已跳过（${Utils.escape(st.skipReason || '')}）</span>`;
+    else if (st.done && rolled) action = `<span class="text-xs" style="color:var(--c-teal)">已领 🪙${linked.rewardResult.coins} · 行动点${linked.rewardResult.ap}</span>`;
+    else if (st.done && rewardable) action = `<button class="btn btn-primary btn-sm" onclick="Views._routeRoll('${def.id}')">🎲 掷骰领奖励</button>`;
+    else if (st.done && !rewardable) action = `<span class="text-xs text-light">已计入健康打卡</span>`;
+    else action = `<button class="btn btn-secondary btn-sm" onclick="Views._routeSkip('${def.id}')">放弃</button>`;
+    return `
+      <div class="card" style="margin-bottom:10px; ${st.done || st.skipped ? 'opacity:.7' : ''}">
+        <label class="flex items-center gap-2" style="cursor:pointer">
+          <input type="checkbox" ${st.done ? 'checked' : ''} onchange="Views._routeToggle('${def.id}')" style="width:18px;height:18px" ${st.skipped ? 'disabled' : ''}>
+          <div style="flex:1">
+            <div class="${st.done ? 'line-through' : ''} font-bold">${Utils.escape(def.label)}</div>
+            <div class="text-xs text-light">⚓ ${Utils.escape(def.anchor)} · ${def.estMin ? def.estMin + ' 分钟' : '打卡项'}${rewardable ? ' · 🎲可掷骰' : ''}</div>
+          </div>
+        </label>
+        <div class="flex items-center justify-between mt-1">
+          <span class="text-xs text-light">${def.type === 'habit' ? '健康打卡' : '专注任务'}</span>
+          ${action}
+        </div>
+      </div>`;
+  }).join('');
+
+  const floatHTML = DAILY_ROUTE_FLOAT.map(def => {
+    const st = stateOf(def.id);
+    const linked = Game.routeLinked(def.id);
+    const rolled = linked && linked.rolled;
+    let action;
+    if (st.skipped) action = `<span class="text-xs text-light">已跳过</span>`;
+    else if (st.done && rolled) action = `<span class="text-xs" style="color:var(--c-teal)">已领 🪙${linked.rewardResult.coins} · 行动点${linked.rewardResult.ap}</span>`;
+    else if (st.done) action = `<button class="btn btn-primary btn-sm" onclick="Views._routeRoll('${def.id}')">🎲 掷骰领奖励</button>`;
+    else action = `<span class="text-xs text-light">有余力再勾</span>`;
+    return `
+      <div class="card" style="margin-bottom:8px">
+        <label class="flex items-center gap-2" style="cursor:pointer">
+          <input type="checkbox" ${st.done ? 'checked' : ''} onchange="Views._routeToggle('${def.id}')" style="width:18px;height:18px">
+          <div style="flex:1"><div class="${st.done ? 'line-through' : ''}">${Utils.escape(def.label)}</div><div class="text-xs text-light">${def.estMin} 分钟 · 🎲可掷骰</div></div>
+        </label>
+        <div class="flex items-center justify-between mt-1">${action}</div>
+      </div>`;
+  }).join('');
+
+  const envHTML = ENV_ANCHORS.map(([k, v]) => `<span style="display:inline-block;margin:3px;padding:3px 8px;background:var(--bg-soft);border-radius:10px;font-size:12px">${Utils.escape(k)} → ${Utils.escape(v)}</span>`).join('');
+
   const cards = [
     { icon: '🎲', title: '今日任务', desc: '清单勾选 + 手动掷骰领奖', view: 'dice' },
     { icon: '📝', title: '补记登记', desc: '事后补记学习/工作，AI 归类计进度', view: 'daily' },
@@ -6545,6 +6678,7 @@ Views.execute = function (el) {
         <span style="font-size:18px; color:var(--text-light)">›</span>
       </div>
     </div>`).join('');
+
   el.innerHTML = `
     <div class="card" style="background:linear-gradient(135deg,#FF6B6B,#C4A7E7); color:#fff">
       <div class="text-sm" style="opacity:.85">今日计划进度</div>
@@ -6552,9 +6686,95 @@ Views.execute = function (el) {
       <div style="margin-top:8px">${Progress.progressBar(tp.pct, true)}</div>
       <div class="text-xs mt-1" style="opacity:.85">${tp.done}/${tp.total} 项已勾${tp.rollsLeft ? ' · 还可掷骰 ' + tp.rollsLeft + ' 次 🎲' : ''}</div>
     </div>
-    <div class="section-title" style="margin-top:16px">计划与执行</div>
+
+    <div class="section-title" style="margin-top:16px">🧭 每日线路（行为锚定 · 不挂钟）</div>
+    <div class="text-xs text-light" style="margin-bottom:8px">按"做完上一样再开下一样"的链推进；≥15 分钟的任务完成后可掷骰领奖（与今日计划同一套掷骰）；浮动项有余力再挑；经期第一天允许磨合。</div>
+    ${reqHTML}
+
+    <details class="card" style="margin-top:8px">
+      <summary style="cursor:pointer; font-weight:bold">➕ 浮动项（有余力再挑）</summary>
+      <div style="margin-top:10px">${floatHTML}</div>
+    </details>
+
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">🏠 环境锚点（给常乱的东西定家）</div>
+      <div style="margin-top:6px">${envHTML}</div>
+    </div>
+
+    <div class="section-title" style="margin-top:16px">其他入口</div>
     ${cardsHTML}
   `;
+};
+
+/* ----- 每日线路交互：勾选 / 掷骰 / 放弃（接今日计划掷骰奖励） ----- */
+Views._routeToggle = function (id) {
+  const def = ROUTE_DEF(id); if (!def) return;
+  const route = Game.ensureRoute();
+  const st = route.items.find(i => i.id === id); if (!st) return;
+  if (st.skipped) return;
+  const linked = Game.routeLinked(id);
+  if (st.done && linked && linked.rolled) {
+    Utils.toast('已领奖，不能撤销哦', 'warning');
+    Router.render(); return;
+  }
+  st.done = !st.done;
+  if (def.rewardMin >= 15) {
+    if (st.done) Game.ensureRouteTodayItem(def);
+    else Game.removeRouteTodayItem(id);
+  }
+  Store.save();
+  Router.render();
+};
+
+Views._routeRoll = function (id) {
+  const def = ROUTE_DEF(id); if (!def) return;
+  if (def.rewardMin < 15) { Utils.toast('该项不足 15 分钟，无掷骰奖励', 'info'); return; }
+  Game.ensureRouteTodayItem(def);
+  Views._todayRoll(Game.routeTodayId(id)); // 复用今日计划掷骰（写 rolled + rewardResult + 发 toast）
+  Router.render();
+};
+
+Views._routeSkip = function (id) {
+  const def = ROUTE_DEF(id); if (!def) return;
+  const st = Game.ensureRoute().items.find(i => i.id === id); if (!st) return;
+  Utils.modal('放弃「' + def.label + '」？', `
+    <p class="text-sm">今天为什么做不了这一项？诚实填写，AI 会判断是否能跳过：</p>
+    <textarea id="route-skip-reason" class="form-input" rows="3" placeholder="如：痛经第一天起不来 / 突然发烧"></textarea>
+    <button class="btn btn-primary btn-block mt-3" onclick="Views._routeSubmitSkip('${id}')">提交</button>
+    <button class="btn btn-secondary btn-block mt-2" onclick="Utils.closeModal()">再想想</button>
+  `);
+};
+
+Views._routeSubmitSkip = async function (id) {
+  const def = ROUTE_DEF(id); if (!def) { Utils.closeModal(); return; }
+  const reason = ((document.getElementById('route-skip-reason') || {}).value || '').trim();
+  if (!reason) { Utils.toast('请先填理由', 'error'); return; }
+  const route = Game.ensureRoute();
+  const st = route.items.find(i => i.id === id);
+  let ok = true;
+  if (AIClient.hasKey()) {
+    try {
+      const r = await AIClient.callChat(
+        [{ role: 'user', content: `用户每日线路任务是「${def.label}」，理由是「${reason}」所以无法完成。请判断这个理由是否真实且不可抗拒（如生病、生理期、突发紧急事件）。只回复JSON：{"skip":true} 或 {"skip":false}，不要任何解释。` }],
+        { system: '你是严格的借口审查官，只有真实不可抗拒的理由才允许跳过，水理由一律 false。', temperature: 0.2, maxTokens: 40 }
+      );
+      const m = (r || '').match(/\{[\s\S]*\}/);
+      if (m) { const j = JSON.parse(m[0]); ok = !!j.skip; }
+    } catch (e) { /* 网络异常则保守允许跳过并记录理由 */ }
+  }
+  st.skipReason = reason;
+  if (ok) {
+    st.skipped = true; st.done = true;
+    if (def.rewardMin >= 15) { const it = Game.ensureRouteTodayItem(def); it.skipped = true; it.rolled = false; it.rewardResult = null; }
+    Utils.closeModal();
+    Utils.toast('已跳过，本次无奖励（理由已记录）', 'info');
+  } else {
+    st.done = false;
+    Utils.closeModal();
+    Utils.toast('AI 认为理由不充分，这一项还是得完成哦（已记录说明）', 'warning');
+  }
+  Store.save();
+  Router.render();
 };
 
 /* ============================================================
