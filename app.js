@@ -5986,8 +5986,16 @@ const Companion = {
     const today = Utils.todayStr();
     const todayLog = Store.data.dailyLogs[today] || { activities: [] };
     const activities = (todayLog.activities || []).slice(-5).reverse();
+    const now = new Date();
+    const wk = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
+    const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
     let p = '';
+
+    // === 当前时间（让 AI grounding 到真实的今天与此刻）===
+    p += `【当前时间】\n`;
+    p += `- 今天日期：${today}（星期${wk}）\n`;
+    p += `- 现在时间：${clock}\n\n`;
 
     // === 角色设定 ===
     p += '【你的角色设定】\n';
@@ -6162,7 +6170,9 @@ actions 是要执行的动作数组，可为空。每个动作格式：
 - 监督计划时，具体提到任务名称，让用户感受到你真的了解TA的目标。
 - 主动关心和督促，但不要每句话都说教。
 - 【任务控制规则】用户说"跳过""下一个""换个任务""不想做了""做完了"等意图时，用对应的action。skip_task/complete_task/exit_exec只在有当前执行任务时才用。start_task的taskName要尽量匹配用户计划体系里已有的任务名（可以模糊匹配）。不要在用户没表达这些意图时自作主张触发任务控制。
-- 【生活常识】成年人正常睡眠时间通常在22:00-24:00之间，建议睡前不要太早。不要催用户9点多就睡觉，除非用户自己提到想早睡。一般建议23:00左右准备睡觉即可。`;
+- 【生活常识】成年人正常睡眠时间通常在22:00-24:00之间，建议睡前不要太早。不要催用户9点多就睡觉，除非用户自己提到想早睡。一般建议23:00左右准备睡觉即可。
+- 【时间认知·重要】上面「今天日期」就是今天，上面「现在时间」就是此刻真实时间。聊天历史里可能包含往日的对话（每条都带 [YYYY-MM-DD] 日期戳），若某条提到「今天/昨天/这周」，一律以这个日期换算，绝不要把昨天发生的事当成今天的待办或今天的进度。
+- 【能力边界·重要】你是一个没有实体的AI伙伴，无法替用户执行任何现实世界的具体操作，例如：点外卖、网购下单、打电话、跑腿代办、转账、预约挂号、代发消息、代设提醒等。如果用户让你做这些，温柔说明你做不到，并把话题转为陪伴、出主意或鼓励；不要承诺任何你实际无法完成的现实动作（如「我待会帮你点」「我帮你弄好」「明天我提醒你」）。但是：虚拟的亲密陪伴表达（亲亲、抱抱、摸摸头、陪着你、我一直在）你完全可以、也应该大方给——这是用户需要的情绪支持，不必拘谨。`;
 
     return p;
   },
@@ -6198,10 +6208,14 @@ actions 是要执行的动作数组，可为空。每个动作格式：
 
     // 构建对话消息（保留最近 20 条）
     const recentHistory = char.chatHistory.slice(-20);
-    const messages = recentHistory.map(m => ({
-      role: m.role === 'user' ? 'user' : 'assistant',
-      content: m.content,
-    }));
+    const messages = recentHistory.map(m => {
+      const md = (m.time || '').slice(0, 10);
+      const stamp = md ? `[${md}] ` : '';
+      return {
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: stamp + m.content,
+      };
+    });
 
     try {
       const systemPrompt = this.buildSystemPrompt();
