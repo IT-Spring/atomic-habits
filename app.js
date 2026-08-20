@@ -212,19 +212,38 @@ const Utils = {
     return days + '天前';
   },
 
+  // 共享音频上下文（移动端自动播放策略要求：必须在用户手势后 resume 才能出声）
+  _audioCtx: null,
+  _getAudioCtx() {
+    if (!Utils._audioCtx) {
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        Utils._audioCtx = new AC();
+      } catch (e) { Utils._audioCtx = null; }
+    }
+    return Utils._audioCtx;
+  },
+  // 在首次用户手势时调用，解锁音频（手机端必做，否则 setInterval 触发的声音被浏览器静音）
+  unlockAudio() {
+    const ctx = Utils._getAudioCtx();
+    if (ctx && ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
+  },
   playBeep() {
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const ctx = Utils._getAudioCtx();
+      if (!ctx) return;
+      if (ctx.state === 'suspended') { try { ctx.resume(); } catch (e) {} }
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.frequency.value = 880;
       osc.type = 'sine';
-      gain.gain.setValueAtTime(0.15, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.5);
       osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.4);
+      osc.stop(ctx.currentTime + 0.5);
     } catch (e) {}
   },
 
@@ -527,9 +546,9 @@ const Game = {
 
   spendAP(attr) {
     const s = this.ensure();
-    if (s.ap < 50) return false;
+    if (s.ap < 25) return false;
     if (!this.ATTR_KEYS.includes(attr)) return false;
-    s.ap -= 50;
+    s.ap -= 25;
     s.manualBonus[attr] = (s.manualBonus[attr] || 0) + 1;
     Store.save();
     return true;
@@ -593,7 +612,7 @@ const Game = {
     return { ok: true, left: s.coins };
   },
 
-  coinsToYuan() { return (this.ensure().coins / 50).toFixed(2); },
+  coinsToYuan() { return (this.ensure().coins / 25).toFixed(2); },
 };
 
 const Router = {
@@ -645,7 +664,7 @@ const Views = {
             <span class="font-bold">${Game.ATTR_ICONS[k]} ${Game.ATTR_NAMES[k]}</span>
             <span class="text-sm text-light ml-2">${attrs[k]}</span>
           </div>
-          <button class="btn btn-secondary btn-sm" ${ap >= 50 ? '' : 'disabled style="opacity:.5;cursor:not-allowed"'} onclick="Game.spendAP('${k}'); Views.stats(document.getElementById('main-content'));">+1（满 50 行动点）</button>
+          <button class="btn btn-secondary btn-sm" ${ap >= 25 ? '' : 'disabled style="opacity:.5;cursor:not-allowed"'} onclick="Game.spendAP('${k}'); Views.stats(document.getElementById('main-content'));">+1（满 25 行动点）</button>
         </div>
       </div>
     `).join('');
@@ -674,10 +693,10 @@ const Views = {
           <div class="card-title" style="margin:0">🪙 游戏币</div>
           <div style="font-size:24px; font-weight:800; color:var(--c-coral)">${g.coins}</div>
         </div>
-        <div class="text-sm text-light mt-1">≈ ¥${yuan}（50 币 = 1 元，礼品你现实自买后在此登记扣除）</div>
+        <div class="text-sm text-light mt-1">≈ ¥${yuan}（25 币 = 1 元，礼品你现实自买后在此登记扣除）</div>
       </div>
 
-      <div class="section-title">属性（攒满 50 行动点 +1，对应身份认同投票）</div>
+      <div class="section-title">属性（攒满 25 行动点 +1，对应身份认同投票）</div>
       ${attrRows}
 
       <div class="card">
@@ -3081,6 +3100,8 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
             <span class="slider"></span>
           </label>
         </div>
+        <button class="btn btn-secondary btn-sm btn-block mt-2" onclick="Utils.unlockAudio(); Utils.playBeep(); Utils.toast('🔔 这是提醒声音', 'info')">🔊 试听提醒声音</button>
+        <p class="text-xs text-light mt-2">提醒每 ${s.reminderInterval} 分钟一次，需先点一下页面任意位置解锁音频（手机自动播放限制），建议把应用装到主屏。</p>
         <button class="btn btn-primary btn-sm btn-block mt-2" onclick="Views.saveSettings()">保存设置</button>
       </div>
 
@@ -6175,9 +6196,39 @@ actions 是要执行的动作数组，可为空。每个动作格式：
 - 【任务控制规则】用户说"跳过""下一个""换个任务""不想做了""做完了"等意图时，用对应的action。skip_task/complete_task/exit_exec只在有当前执行任务时才用。start_task的taskName要尽量匹配用户计划体系里已有的任务名（可以模糊匹配）。不要在用户没表达这些意图时自作主张触发任务控制。
 - 【生活常识】成年人正常睡眠时间通常在22:00-24:00之间，建议睡前不要太早。不要催用户9点多就睡觉，除非用户自己提到想早睡。一般建议23:00左右准备睡觉即可。
 - 【时间认知·重要】上面「今天日期」就是今天，上面「现在时间」就是此刻真实时间。聊天历史里可能包含往日的对话（每条都带 [YYYY-MM-DD] 日期戳），若某条提到「今天/昨天/这周」，一律以这个日期换算，绝不要把昨天发生的事当成今天的待办或今天的进度。
-- 【能力边界·重要】你是一个没有实体的AI伙伴，无法替用户执行任何现实世界的具体操作，例如：点外卖、网购下单、打电话、跑腿代办、转账、预约挂号、代发消息、代设提醒等。如果用户让你做这些，温柔说明你做不到，并把话题转为陪伴、出主意或鼓励；不要承诺任何你实际无法完成的现实动作（如「我待会帮你点」「我帮你弄好」「明天我提醒你」）。但是：虚拟的亲密陪伴表达（亲亲、抱抱、摸摸头、陪着你、我一直在）你完全可以、也应该大方给——这是用户需要的情绪支持，不必拘谨。`;
+- 【能力边界·重要】你是一个没有实体的AI伙伴，无法替用户执行任何现实世界的具体操作，例如：点外卖、网购下单、打电话、跑腿代办、转账、预约挂号、代发消息、代设提醒等。如果用户让你做这些，温柔说明你做不到，并把话题转为陪伴、出主意或鼓励；不要承诺任何你实际无法完成的现实动作（如「我待会帮你点」「我帮你弄好」「明天我提醒你」）。但是：虚拟的亲密陪伴表达（亲亲、抱抱、摸摸头、陪着你、我一直在）你完全可以、也应该大方给——这是用户需要的情绪支持，不必拘谨。
+
+- 【语义理解·闲聊与任务区分·重要】以下类型的话，绝不要当成"任务"，不要创建或开始任何任务、也不要记成活动，只需像朋友一样自然回复（actions 设为空数组 []）：
+  · 问候/寒暄：早上好、早、中午好、下午好、晚上好、晚安、你好、在吗、嗨
+  · 情绪/撒娇/亲密表达：我好累、烦、无聊、想你、爱你、亲亲、抱抱、呜呜、emo、摸摸头
+  · 纯闲聊/无明确行动：哈哈、哈哈哈、在的、摸摸
+  只有用户明确表达"要做某事 / 想做某个具体任务 / 提醒我 / 记一笔账"等行动意图时，才使用对应 action。用户只是打招呼或抒发情绪，给一句温柔的陪伴回复即可，不要展开任务监督、不要主动提议新任务。`;
 
     return p;
+  },
+
+  /* --- 闲聊/问候语义识别：避免把"早上好"这类话当成任务 --- */
+  _isSmallTalk(text) {
+    const s = (text || '').replace(/[\s\p{P}\p{Emoji}\u3000-\u303F]/gu, '').toLowerCase();
+    if (!s) return false;
+    const greet = ['早', '早上好', '早安', '中午好', '下午好', '晚上好', '晚安', '你好', '您好', '在吗', '在不在', '在的', '在呀', '哈', '哈哈', '哈哈哈', '嘿', '嗨', 'hi', 'hello', 'hey', '爱你', '想你', '亲亲', '抱抱', '摸摸', '呜呜', '嘤', '烦', '无聊', '累', '我累了', '我好累', 'emo'];
+    if (greet.includes(s)) return true;
+    if (s.length <= 4 && /^(早|你好|您好|在吗|嗨|嘿|哈|hi|hello|hey|晚安|下午好|中午好|晚上好|早上好|早安)/.test(s)) return true;
+    return false;
+  },
+
+  _smallTalkReply(text, char) {
+    const s = (text || '').replace(/[\s\p{P}\p{Emoji}\u3000-\u303F]/gu, '').toLowerCase();
+    const name = char.userNickname || 'Ricky';
+    if (/^(早|早上好|早安)/.test(s)) return `早上好呀 ${name}～新的一天开始啦，今天也慢慢来，不用急 💛`;
+    if (/^(中午好)/.test(s)) return `中午好～记得吃点东西，别饿着 🍚`;
+    if (/^(下午好)/.test(s)) return `下午好呀，今天过得还顺吗？`;
+    if (/^(晚上好|晚安)/.test(s)) return `晚上好～忙了一天辛苦啦，早点休息哦 🌙`;
+    if (/^(你好|您好|嗨|嘿|hi|hello|hey)/.test(s)) return `我在呢～有什么想聊的都可以跟我说 💬`;
+    if (/在吗|在的|在呀/.test(s)) return `在的在的，我一直都在 🤗`;
+    if (/哈/.test(s)) return `哈哈，你笑起来真好看 😊`;
+    if (/爱|想|亲|抱|摸|呜|嘤|emo|烦|无聊|累/.test(s)) return `抱抱你 ${name} 🤗 我在呢，想说什么都行。`;
+    return `我在呢～`;
   },
 
   /* --- 发送消息 --- */
@@ -6207,6 +6258,20 @@ actions 是要执行的动作数组，可为空。每个动作格式：
       Store.save();
       this.sending = false;
       return { reply: focusHandled.reply, actionResults: [] };
+    }
+
+    // 离线且无 Key 时：纯问候/闲聊直接给陪伴回复，绝不调 AI、绝不生成任务
+    if (!AIClient.hasKey() && this._isSmallTalk(message)) {
+      const reply = this._smallTalkReply(message, char);
+      char.chatHistory.push({
+        role: 'assistant',
+        content: reply,
+        time: new Date().toISOString(),
+      });
+      if (char.chatHistory.length > 200) char.chatHistory = char.chatHistory.slice(-200);
+      Store.save();
+      this.sending = false;
+      return { reply, actionResults: [] };
     }
 
     // 构建对话消息（保留最近 20 条）
@@ -6470,6 +6535,17 @@ const App = {
         Reminder.fire();
       }
     }, 60000);
+
+    // 首次用户手势解锁音频（手机端自动播放策略：不解锁则提醒声音被静音）
+    const unlockAudioOnce = () => {
+      Utils.unlockAudio();
+      window.removeEventListener('pointerdown', unlockAudioOnce);
+      window.removeEventListener('touchstart', unlockAudioOnce);
+      window.removeEventListener('keydown', unlockAudioOnce);
+    };
+    window.addEventListener('pointerdown', unlockAudioOnce);
+    window.addEventListener('touchstart', unlockAudioOnce);
+    window.addEventListener('keydown', unlockAudioOnce);
   },
 
   bindNav() {
