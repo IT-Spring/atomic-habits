@@ -3101,7 +3101,8 @@ ${doneActivities ? `今天已经做过的事：\n${doneActivities}\n` : '今天�
           </label>
         </div>
         <button class="btn btn-secondary btn-sm btn-block mt-2" onclick="Utils.unlockAudio(); Utils.playBeep(); Utils.toast('🔔 这是提醒声音', 'info')">🔊 试听提醒声音</button>
-        <p class="text-xs text-light mt-2">提醒每 ${s.reminderInterval} 分钟一次，需先点一下页面任意位置解锁音频（手机自动播放限制），建议把应用装到主屏。</p>
+        <p class="text-xs text-light mt-2">提醒每 ${s.reminderInterval} 分钟一次。前台用自定义"滴滴"声；锁屏/后台由系统通知+振动响（需把应用安装到主屏并保持后台运行）。</p>
+        <button class="btn btn-outline btn-sm btn-block mt-2" style="border-color:var(--c-teal); color:var(--c-teal)" onclick="Reminder.testSW()">🔔 测试锁屏提醒</button>
         <button class="btn btn-primary btn-sm btn-block mt-2" onclick="Views.saveSettings()">保存设置</button>
       </div>
 
@@ -5741,6 +5742,32 @@ const Reminder = {
     this.timer = setInterval(() => this.fire(), interval);
     Store.data.lastReminderTime = Date.now();
     Store.save();
+    this.syncToSW();
+  },
+
+  // 把提醒配置同步给 Service Worker，让锁屏/后台也能响
+  syncToSW() {
+    try {
+      if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) return;
+      const s = Store.data.settings;
+      navigator.serviceWorker.controller.postMessage({
+        type: 'REMINDER_CONFIG',
+        enabled: s.reminderEnabled,
+        intervalMin: s.reminderInterval,
+      });
+    } catch (e) {}
+  },
+
+  // 让 SW 立刻弹一次通知（设置页"测试锁屏提醒"用）
+  testSW() {
+    try {
+      if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) {
+        Utils.toast('请先把应用安装到主屏，并刷新一次', 'warning');
+        return;
+      }
+      navigator.serviceWorker.controller.postMessage({ type: 'REMINDER_TEST' });
+      Utils.toast('已发送测试，锁屏后看是否弹出通知', 'success');
+    } catch (e) {}
   },
 
   stop() {
@@ -6546,6 +6573,11 @@ const App = {
     window.addEventListener('pointerdown', unlockAudioOnce);
     window.addEventListener('touchstart', unlockAudioOnce);
     window.addEventListener('keydown', unlockAudioOnce);
+
+    // 页面回到前台（解锁屏）时重新同步提醒到 SW（SW 可能已重启）
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) Reminder.syncToSW();
+    });
   },
 
   bindNav() {
@@ -6572,11 +6604,17 @@ const App = {
         navigator.serviceWorker.addEventListener('controllerchange', () => {
           if (refreshing) return;
           refreshing = true;
+          setTimeout(() => Reminder.syncToSW(), 300);
           window.location.reload();
         });
         // 主动检查更新：打开时一次 + 之后每分钟一次
         reg.update();
         setInterval(() => { try { reg.update(); } catch (e) {} }, 60000);
+        // SW 就绪后把提醒配置同步过去（锁屏/后台响铃依赖此）
+        try {
+          await navigator.serviceWorker.ready;
+          Reminder.syncToSW();
+        } catch (e) {}
       } catch (e) {
         console.log('SW registration failed', e);
       }

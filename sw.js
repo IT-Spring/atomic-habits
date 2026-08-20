@@ -53,3 +53,52 @@ self.addEventListener("fetch", (e) => {
       .catch(() => caches.match(e.request))
   );
 });
+
+/* ========== 后台提醒（锁屏/应用后台时由 SW 保活触发） ========== */
+let reminderTimer = null;
+let reminderIntervalMin = 30;
+
+self.addEventListener('message', (e) => {
+  const d = e.data || {};
+  if (d.type === 'REMINDER_CONFIG') {
+    reminderIntervalMin = Math.max(1, d.intervalMin || 30);
+    if (d.enabled) startSWReminder();
+    else stopSWReminder();
+  } else if (d.type === 'REMINDER_TEST') {
+    swFireReminder();
+  }
+});
+
+function startSWReminder() {
+  stopSWReminder();
+  reminderTimer = setInterval(swFireReminder, reminderIntervalMin * 60 * 1000);
+}
+
+function stopSWReminder() {
+  if (reminderTimer) { clearInterval(reminderTimer); reminderTimer = null; }
+}
+
+function swFireReminder() {
+  self.registration.showNotification('⏰ 时间记录提醒', {
+    body: '你刚才在做什么？花10秒记录一下吧～',
+    icon: 'icon-192.png',
+    badge: 'icon-192.png',
+    tag: 'plan-reminder',
+    renotify: true,
+    vibrate: [200, 100, 200, 100, 200],
+    data: { url: '/' },
+  }).catch(() => {});
+}
+
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  e.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((cls) => {
+      for (const c of cls) {
+        if ('focus' in c) return c.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow('/');
+      return undefined;
+    })
+  );
+});
