@@ -68,6 +68,8 @@ const Store = {
       },
       todayPlan: { date: '', items: [] }, // 今日计划：{id,text,durMin,reward,done,rolled,rewardResult,skipped,skipReason}
       dailyRoute: { date: '', items: [] }, // 每日线路完成态：{id,done,skipped,skipReason}（结构在 DAILY_ROUTE 常量）
+      groupChat: { messages: [] }, // 群聊流：{id,sender:'user'|'guide'|'companion',content,time,isPrompt?}
+      guideChat: { history: [] }, // 引导者独立上下文：{role:'user'|'assistant',content,time}
       versionHistory: [],
       sopTemplates: [],
       settings: {
@@ -139,6 +141,10 @@ const Store = {
     if (!this.data.todayPlan.items) this.data.todayPlan.items = [];
     if (!this.data.dailyRoute) this.data.dailyRoute = { date: '', items: [] };
     if (!this.data.dailyRoute.items) this.data.dailyRoute.items = [];
+    if (!this.data.groupChat) this.data.groupChat = { messages: [] };
+    if (!this.data.groupChat.messages) this.data.groupChat.messages = [];
+    if (!this.data.guideChat) this.data.guideChat = { history: [] };
+    if (!this.data.guideChat.history) this.data.guideChat.history = [];
   },
 
   recordVersion(action, detail) {
@@ -616,14 +622,14 @@ const Game = {
 };
 
 const Router = {
-  current: 'dashboard',
+  current: 'group',
 
   navigate(view) {
     this.current = view;
     document.querySelectorAll('.nav-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.view === view);
     });
-    const titles = { dashboard: '概览', execute: '计划与执行', profile: '个人信息', plans: '计划体系', daily: '每日登记', companion: '陪伴', settings: '设置', stats: '数值', dice: '今日' };
+    const titles = { dashboard: '概览', execute: '计划与执行', profile: '个人信息', plans: '计划体系', daily: '每日登记', companion: '陪伴', settings: '设置', stats: '数值', dice: '今日', group: '群聊' };
     document.getElementById('page-title').textContent = titles[view] || '';
     this.render();
   },
@@ -643,6 +649,7 @@ const Router = {
       case 'execute': Views.execute(main); break;
       case 'habit': Views.habit(main); break;
       case 'focus': Views.focus(main); break;
+      case 'group': Views.group(main); break;
     }
   },
 };
@@ -2303,6 +2310,100 @@ const Views = {
     }, 300);
   },
 
+  /* ----- 群聊首页（用户 + 引导者 + 陪伴者） ----- */
+  group(el) {
+    el.className = 'content group-view';
+    const g = Store.data.groupChat;
+    const char = Store.data.aiCharacter;
+    const compName = (char && char.name) ? char.name : '陪伴者';
+    const compAvatar = (char && char.avatar) ? char.avatar : '💜';
+    const hasKey = AIClient.hasKey();
+    const hasChar = Companion.hasCharacter();
+
+    // 首次进入播种欢迎语（只一次）
+    if (!g.messages.length) this._seedGroupIntro(compName);
+
+    const statusInit = hasKey ? '连接检测中…' : '未连接 API · 点此去设置';
+    const bubbles = g.messages.map(m => this._renderGroupBubble(m, { compName, compAvatar })).join('');
+
+    let typingHTML = '';
+    if (GroupChat.typing.guide) typingHTML += this._groupTyping('🧭', '引导者');
+    if (GroupChat.typing.companion) typingHTML += this._groupTyping(compAvatar, compName);
+
+    el.innerHTML = `
+      <div class="grp-status" id="group-status" onclick="GroupChat.onStatusClick()">
+        <span class="group-status-dot ${hasKey ? 'checking' : 'off'}" id="group-status-dot"></span>
+        <span id="group-status-text" class="grp-status-text">${statusInit}</span>
+        <span class="grp-status-tag">群聊 · 执行+陪伴</span>
+      </div>
+
+      <div class="grp-chat" id="group-chat">
+        ${!hasChar ? `<div class="grp-hint">还没设定陪伴者性格？点右下角 ⚙️ 设定，她会更懂你 💕</div>` : ''}
+        ${bubbles}
+        ${typingHTML}
+      </div>
+
+      <div class="grp-quickbar">
+        <button class="grp-chip" onclick="GroupChat.prefill('@引导者 ')">@引导者</button>
+        <button class="grp-chip" onclick="GroupChat.prefill('@陪伴者 ')">@陪伴者</button>
+        <button class="grp-chip" onclick="Views.quickExpense()">💸记账</button>
+        <button class="grp-chip" onclick="Views.quickLog('meal')">🍽️用餐</button>
+      </div>
+
+      <div class="grp-inputbar">
+        <button class="grp-vision-btn" title="引导者让我描述环境/状态" onclick="GroupChat.triggerVision()">📷</button>
+        <input class="grp-input" id="group-input" placeholder="对群聊说点什么…（@引导者/@陪伴者 指定谁回）" onkeydown="if(event.key==='Enter')GroupChat.sendInput()">
+        <button class="grp-send" onclick="GroupChat.sendInput()">➤</button>
+        <button class="grp-set-btn" title="陪伴者性格设定" onclick="Views.openCharacterSetup()">⚙️</button>
+      </div>
+    `;
+
+    const chat = document.getElementById('group-chat');
+    if (chat) chat.scrollTop = chat.scrollHeight;
+    if (hasKey) GroupChat.checkConnection();
+  },
+
+  _seedGroupIntro(compName) {
+    Store.data.groupChat.messages.push({ id: GroupChat._id(), sender: 'guide', content: '我是引导者 🧭，负责帮你把计划落地——拆解任务、给第一步、推进执行。有想做的事直接说～', time: new Date().toISOString() });
+    Store.data.groupChat.messages.push({ id: GroupChat._id(), sender: 'companion', content: `我是${compName} 💕，陪你聊天、照顾你的情绪。学习/记账/执行的事引导者更在行，想聊心情随时找我～`, time: new Date().toISOString() });
+    Store.save();
+  },
+
+  _renderGroupBubble(m, ctx) {
+    const time = Utils.formatTime(m.time);
+    if (m.sender === 'user') {
+      return `<div class="grp-msg grp-user"><div class="grp-bubble grp-bubble-user">${Utils.escape(m.content).replace(/\n/g, '<br>')}</div><div class="grp-time">${time}</div></div>`;
+    }
+    if (m.isAction) {
+      return `<div class="grp-action">${Utils.escape(m.content)}</div>`;
+    }
+    if (m.isError) {
+      return `<div class="grp-error">${Utils.escape(m.content)}</div>`;
+    }
+    const isGuide = m.sender === 'guide';
+    const avatar = isGuide ? '🧭' : ctx.compAvatar;
+    const name = isGuide ? '引导者' : ctx.compName;
+    const cls = isGuide ? 'grp-guide' : 'grp-companion';
+    return `<div class="grp-msg ${cls}">
+      <div class="grp-avatar">${avatar}</div>
+      <div class="grp-bubble-wrap">
+        <div class="grp-name">${Utils.escape(name)}${m.isPrompt ? ' <span class="grp-prompt-tag">提示</span>' : ''}</div>
+        <div class="grp-bubble grp-bubble-bot">${Utils.escape(m.content).replace(/\n/g, '<br>')}</div>
+        <div class="grp-time">${time}</div>
+      </div>
+    </div>`;
+  },
+
+  _groupTyping(avatar, name) {
+    return `<div class="grp-msg grp-typing-msg">
+      <div class="grp-avatar">${avatar}</div>
+      <div class="grp-bubble-wrap">
+        <div class="grp-name">${Utils.escape(name)}</div>
+        <div class="grp-bubble grp-bubble-bot"><span class="ai-typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span></div>
+      </div>
+    </div>`;
+  },
+
   _renderChatBubble(msg, char) {
     const isUser = msg.role === 'user';
     const time = Utils.formatTime(msg.time);
@@ -3356,6 +3457,24 @@ const AIClient = {
 
   hasKey() {
     return !!this.apiKey;
+  },
+
+  // 轻量连接检测（带 5 分钟缓存，避免每次渲染都打 API）
+  _connCache: null,
+  async testConnection(force) {
+    const now = Date.now();
+    if (!force && this._connCache && now - this._connCache.ts < 5 * 60 * 1000) {
+      return this._connCache.ok;
+    }
+    if (!this.apiKey) { this._connCache = { ok: false, ts: now }; return false; }
+    try {
+      await this.call('ping', { system: '你是连接测试，只回复“ok”两个字，不要多余内容。', maxTokens: 5, temperature: 0 });
+      this._connCache = { ok: true, ts: now };
+      return true;
+    } catch (e) {
+      this._connCache = { ok: false, ts: now };
+      return false;
+    }
   },
 
   async call(prompt, opts = {}) {
@@ -6587,7 +6706,7 @@ const App = {
     document.getElementById('reminder-quick-btn').onclick = () => {
       const badge = document.getElementById('reminder-badge');
       if (badge) badge.style.display = 'none';
-      Router.navigate('companion');
+      Router.navigate('group');
     };
     // 点击遮罩关闭模态框
     document.getElementById('modal-overlay').onclick = (e) => {
@@ -7097,6 +7216,231 @@ Reminder.showBanner = function () {
   };
   document.getElementById('reminder-skip').onclick = () => p.remove();
   setTimeout(() => { if (p.parentElement) p.remove(); }, 60000);
+};
+
+/* ---------- 引导者（执行导向）自由聊天体 ---------- */
+const Guide = {
+  name: '引导者',
+  avatar: '🧭',
+
+  // 执行上下文摘要（给系统提示用，轻量版）
+  _planSummary() {
+    const inc = ExecGuide.getIncompleteTasks();
+    const lines = [];
+    if (inc.length) {
+      lines.push('未完成任务（前 5 个）：' + inc.slice(0, 5).map(t => `${t.taskName}(${t.progress}%)`).join('、'));
+    } else {
+      lines.push('当前没有未完成的计划任务。');
+    }
+    const dr = Store.data.dailyRoute;
+    if (dr && dr.items && dr.items.length) {
+      const done = dr.items.filter(i => i.done).length;
+      lines.push(`今日线路：${done}/${dr.items.length} 已完成`);
+    }
+    return lines.join('\n');
+  },
+
+  buildSystemPrompt() {
+    const now = new Date();
+    const wk = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
+    const clock = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const ct = ExecGuide.currentTask;
+    let p = '';
+    p += `【当前时间】今天 ${Utils.todayStr()}（星期${wk}）${clock}\n\n`;
+    p += `【你的身份】你是「引导者」，一个专注、干练的执行教练。你帮用户把计划真正落地：拆解任务、给第一步、推进执行、记录进度。语气简洁、务实、鼓励但不啰嗦，中文。\n\n`;
+    if (ct) {
+      p += `【当前正在执行的任务】${ct.taskName}（${ct.lvlName} › ${ct.catName} › ${ct.brName}），进度 ${ct.progress}%\n如果用户说跳过/换任务/做完/开始做某事，用对应 action。\n\n`;
+    } else {
+      p += `【执行状态】用户当前没有选中的执行任务。\n\n`;
+    }
+    p += `【计划体系概览】\n${this._planSummary()}\n\n`;
+    p += `【你的职责与边界】
+1. 执行推进：用户说想做/继续某个任务时，用 start_task 帮他开始；卡住时给具体可操作的第一步。
+2. 进度记录：用户说某任务进展时，用 plan_progress 更新；说做完了用 complete_task。
+3. 任务控制：跳过 skip_task / 换任务 switch_task / 退出 exit_exec，只在用户明确表达这些意图时用。
+4. 语义边界（重要）：问候（早/你好/在吗）、情绪倾诉（我好累/想你/难过/撒娇）、纯闲聊，都【不算任务】，不要自作主张触发任务控制，也不要误把闲聊当成要执行的任务。情绪类内容简短共情一句即可，并提示用户「想聊情绪可以 @陪伴者 或找陪伴者」。
+5. 你不负责陪伴情绪，那是陪伴者的职责；两个 AI 之间不会互相对话。
+
+【回复格式】必须返回 JSON，不要输出 JSON 以外的内容：
+{"reply":"你的回复","actions":[]}
+reply 是你以引导者口吻说的回复。
+actions 是要执行的动作数组，可为空。每个动作格式：
+- 开始任务：{"type":"start_task","taskName":"任务名"}（尽量匹配用户计划里已有的任务名，可模糊匹配）
+- 更新进度：{"type":"plan_progress","taskName":"任务名","progress":50}
+- 记录活动：{"type":"activity","activityType":"study","desc":"学了英语1小时"}（activityType: wake,meal,work,rest,exercise,study,sleep,custom）
+- 记账：{"type":"expense","amount":25,"category":"餐饮","note":"午饭"} / {"type":"income","amount":5000,"category":"工资","note":""}
+- 跳过：{"type":"skip_task"} / 完成：{"type":"complete_task"} / 换任务：{"type":"switch_task"} / 退出执行：{"type":"exit_exec"}（后四个仅在用户正在执行某任务且明确表达意图时用）
+`;
+    return p;
+  },
+
+  async send(message) {
+    if (!message || !message.trim()) return { reply: '', actions: [] };
+    const history = Store.data.guideChat.history;
+    history.push({ role: 'user', content: message, time: new Date().toISOString() });
+    const recent = history.slice(-20).map(m => ({ role: m.role, content: m.content }));
+    try {
+      const system = this.buildSystemPrompt();
+      const raw = await AIClient.callChat(recent, { system, temperature: 0.7, maxTokens: 1024 });
+      let reply = raw, actions = [];
+      try {
+        let jsonStr = raw;
+        const m = raw.match(/```json\s*([\s\S]*?)```/) || raw.match(/```\s*([\s\S]*?)```/);
+        if (m) jsonStr = m[1];
+        const s = jsonStr.indexOf('{'), e = jsonStr.lastIndexOf('}');
+        if (s >= 0 && e > s) jsonStr = jsonStr.substring(s, e + 1);
+        const parsed = JSON.parse(jsonStr);
+        reply = parsed.reply || raw;
+        actions = Array.isArray(parsed.actions) ? parsed.actions : [];
+      } catch (e) { reply = raw; }
+      history.push({ role: 'assistant', content: reply, time: new Date().toISOString() });
+      if (history.length > 200) history.splice(0, history.length - 200);
+      Store.save();
+      const actionResults = [];
+      for (const a of actions) {
+        const r = Companion.executeAction(a);
+        if (r) actionResults.push(r);
+      }
+      return { reply, actions: actionResults };
+    } catch (err) {
+      history.pop(); // 出错则撤掉刚才塞进的用户消息，避免污染上下文
+      throw err;
+    }
+  },
+};
+
+/* ---------- 群聊编排器（用户 + 引导者 + 陪伴者） ---------- */
+const GroupChat = {
+  sending: false,
+  typing: { guide: false, companion: false },
+
+  isEmotional(text) {
+    const kw = ['累','疲惫','疲劳','烦','焦虑','郁闷','难过','伤心','孤独','想你','想死','抱抱','爱','撒娇','emo','抑郁','崩溃','压力大','不开心','委屈','难受','空虚','无聊','想哭','失眠','害怕','担心','紧张','生气','愤怒','委屈','委屈','哭','丧','低落','emo了'];
+    return kw.some(k => text.includes(k));
+  },
+
+  _id() { return 'm-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7); },
+
+  pushUser(text) {
+    Store.data.groupChat.messages.push({ id: this._id(), sender: 'user', content: text, time: new Date().toISOString() });
+    Store.save();
+  },
+  pushGuide(text, isPrompt) {
+    Store.data.groupChat.messages.push({ id: this._id(), sender: 'guide', content: text, time: new Date().toISOString(), isPrompt: !!isPrompt });
+    Store.save();
+  },
+  pushCompanion(text) {
+    Store.data.groupChat.messages.push({ id: this._id(), sender: 'companion', content: text, time: new Date().toISOString() });
+    Store.save();
+  },
+  pushAction(who, a) {
+    if (!a) return;
+    Store.data.groupChat.messages.push({ id: this._id(), sender: who, content: `${a.icon} ${a.text}`, time: new Date().toISOString(), isAction: true });
+    Store.save();
+  },
+  pushError(who, msg) {
+    Store.data.groupChat.messages.push({ id: this._id(), sender: who, content: '（连接出了点问题：' + msg + '）', time: new Date().toISOString(), isError: true });
+    Store.save();
+  },
+
+  triggerVision() {
+    if (!AIClient.hasKey()) { Utils.toast('未连接 API，无法聊天', 'warning'); return; }
+    this.pushGuide('📷 你现在可以描述一下你的或环境的状态（用豆包识图后，把文字描述发给我就行～）', true);
+    Utils.toast('引导者已发提示，去豆包识图后把文字发回来～');
+    const el = document.getElementById('main-content');
+    if (el && Router.current === 'group') Views.group(el);
+  },
+
+  async checkConnection() {
+    const dot = document.getElementById('group-status-dot');
+    const txt = document.getElementById('group-status-text');
+    if (!AIClient.hasKey()) {
+      if (dot) dot.className = 'group-status-dot off';
+      if (txt) txt.textContent = '未连接 API · 点此去设置';
+      return;
+    }
+    if (dot) dot.className = 'group-status-dot checking';
+    if (txt) txt.textContent = '连接测试中…';
+    try {
+      const ok = await AIClient.testConnection();
+      if (dot) dot.className = 'group-status-dot ' + (ok ? 'on' : 'off');
+      if (txt) txt.textContent = ok ? ('已连接 · ' + AIClient.provider) : '连接失败 · 点此重试';
+    } catch (e) {
+      if (dot) dot.className = 'group-status-dot off';
+      if (txt) txt.textContent = '连接失败 · 点此重试';
+    }
+  },
+
+  onStatusClick() {
+    if (!AIClient.hasKey()) { Router.navigate('settings'); return; }
+    this.checkConnection();
+  },
+
+  prefill(text) {
+    const input = document.getElementById('group-input');
+    if (input) { input.value = text; input.focus(); }
+  },
+
+  async sendInput() {
+    const input = document.getElementById('group-input');
+    if (!input) return;
+    const text = input.value.trim();
+    if (!text || this.sending) return;
+    input.value = '';
+    await this.send(text);
+  },
+
+  async send(text) {
+    text = (text || '').trim();
+    if (!text || this.sending) return;
+    if (!AIClient.hasKey()) { Utils.toast('未连接 API，无法聊天，请先到设置页配置 Key', 'warning'); return; }
+    this.sending = true;
+
+    // @引导者 / @陪伴者 手动指定
+    let forced = null;
+    if (text.startsWith('@引导者')) { forced = 'guide'; text = text.slice(4).trim(); }
+    else if (text.startsWith('@引导')) { forced = 'guide'; text = text.slice(3).trim(); }
+    else if (text.startsWith('@陪伴者')) { forced = 'companion'; text = text.slice(4).trim(); }
+    else if (text.startsWith('@陪伴')) { forced = 'companion'; text = text.slice(3).trim(); }
+
+    this.pushUser(text);
+
+    const guideResp = forced === 'companion' ? false : true; // 引导者默认每条都回；@陪伴者 时退场
+    const compResp = forced ? (forced === 'companion') : this.isEmotional(text); // @引导者 时为 false
+
+    // 渲染：用户气泡 + 对应 typing
+    this.typing = { guide: guideResp, companion: compResp };
+    const el = document.getElementById('main-content');
+    if (el && Router.current === 'group') Views.group(el);
+
+    const responders = [];
+    if (guideResp) responders.push('guide');
+    if (compResp) responders.push('companion');
+
+    for (const who of responders) {
+      this.typing = { guide: who === 'guide', companion: who === 'companion' };
+      const el2 = document.getElementById('main-content');
+      if (el2 && Router.current === 'group') Views.group(el2);
+      try {
+        if (who === 'guide') {
+          const r = await Guide.send(text);
+          this.pushGuide(r.reply);
+          (r.actions || []).forEach(a => this.pushAction('guide', a));
+        } else {
+          const r = await Companion.send(text);
+          this.pushCompanion(r.reply);
+          (r.actions || []).forEach(a => this.pushAction('companion', a));
+        }
+      } catch (e) {
+        this.pushError(who, e.message || '未知错误');
+      }
+    }
+
+    this.sending = false;
+    this.typing = { guide: false, companion: false };
+    const el3 = document.getElementById('main-content');
+    if (el3 && Router.current === 'group') Views.group(el3);
+  },
 };
 
 /* ---------- 把时间线挂到概览底部 ---------- */

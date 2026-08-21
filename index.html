@@ -17,9 +17,9 @@
   <div id="app">
     <!-- 左侧窄图标栏 -->
     <nav class="side-nav">
-      <button class="nav-btn active" data-view="dashboard">
-        <span class="nav-icon">🏠</span>
-        <span class="nav-label">概览</span>
+      <button class="nav-btn active" data-view="group">
+        <span class="nav-icon">💬</span>
+        <span class="nav-label">群聊</span>
       </button>
       <button class="nav-btn" data-view="execute">
         <span class="nav-icon">📋</span>
@@ -28,10 +28,6 @@
       <button class="nav-btn" data-view="stats">
         <span class="nav-icon">🎮</span>
         <span class="nav-label">数值</span>
-      </button>
-      <button class="nav-btn" data-view="companion">
-        <span class="nav-icon">💬</span>
-        <span class="nav-label">陪伴</span>
       </button>
       <button class="nav-btn" data-view="settings">
         <span class="nav-icon">⚙️</span>
@@ -50,10 +46,13 @@
           <button class="icon-btn" id="ai-remind-btn" title="和 AI 推进一件事" onclick="AIReprompt.open()">
             <span>🤖</span>
           </button>
-          <button class="icon-btn" id="reminder-quick-btn" title="提醒">
-            <span id="reminder-icon">🔔</span>
-            <span class="badge" id="reminder-badge" style="display:none">!</span>
-          </button>
+    <button class="icon-btn" id="group-quick-btn" title="群聊">
+      <span>💬</span>
+    </button>
+    <button class="icon-btn" id="reminder-quick-btn" title="提醒">
+      <span id="reminder-icon">🔔</span>
+      <span class="badge" id="reminder-badge" style="display:none">!</span>
+    </button>
         </div>
       </header>
 
