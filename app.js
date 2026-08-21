@@ -68,7 +68,7 @@ const Store = {
       },
       todayPlan: { date: '', items: [] }, // 今日计划：{id,text,durMin,reward,done,rolled,rewardResult,skipped,skipReason}
       dailyRoute: { date: '', items: [] }, // 每日线路完成态：{id,done,skipped,skipReason}（结构在 DAILY_ROUTE 常量）
-      groupChat: { messages: [] }, // 群聊流：{id,sender:'user'|'guide'|'companion',content,time,isPrompt?}
+      groupChat: { messages: [], envSnapshots: [], awaitingVisionReply: false, lastRouteNudgeDay: '' }, // 群聊流：{id,sender:'user'|'guide'|'companion',content,time,isPrompt?,type:'date'?,envState?}；envSnapshots 环境/状态快照；awaitingVisionReply 等待识图描述回传；lastRouteNudgeDay 每日线路推进每日一次
       guideChat: { history: [] }, // 引导者独立上下文：{role:'user'|'assistant',content,time}
       versionHistory: [],
       sopTemplates: [],
@@ -141,8 +141,11 @@ const Store = {
     if (!this.data.todayPlan.items) this.data.todayPlan.items = [];
     if (!this.data.dailyRoute) this.data.dailyRoute = { date: '', items: [] };
     if (!this.data.dailyRoute.items) this.data.dailyRoute.items = [];
-    if (!this.data.groupChat) this.data.groupChat = { messages: [] };
+    if (!this.data.groupChat) this.data.groupChat = { messages: [], envSnapshots: [], awaitingVisionReply: false, lastRouteNudgeDay: '' };
     if (!this.data.groupChat.messages) this.data.groupChat.messages = [];
+    if (!this.data.groupChat.envSnapshots) this.data.groupChat.envSnapshots = [];
+    if (typeof this.data.groupChat.awaitingVisionReply !== 'boolean') this.data.groupChat.awaitingVisionReply = false;
+    if (typeof this.data.groupChat.lastRouteNudgeDay !== 'string') this.data.groupChat.lastRouteNudgeDay = '';
     if (!this.data.guideChat) this.data.guideChat = { history: [] };
     if (!this.data.guideChat.history) this.data.guideChat.history = [];
   },
@@ -200,6 +203,12 @@ const Utils = {
     const d = new Date(dateStr);
     const days = ['周日','周一','周二','周三','周四','周五','周六'];
     return `${d.getMonth()+1}月${d.getDate()}日 ${days[d.getDay()]}`;
+  },
+
+  dateLabel(dateStr) {
+    const d = new Date(dateStr + 'T00:00:00');
+    const days = ['周日','周一','周二','周三','周四','周五','周六'];
+    return `${dateStr} ${days[d.getDay()]}`;
   },
 
   formatTime(iso) {
@@ -2320,6 +2329,14 @@ const Views = {
     const hasKey = AIClient.hasKey();
     const hasChar = Companion.hasCharacter();
 
+    // ① 每日日期分隔：零点起自动标（引导者/系统标，不是用户标）
+    GroupChat.ensureDaySeparator();
+    // ② 引导者按每日线路主动推进（行为锚定：进群聊时触发，不挂钟；每天一次）
+    if (hasKey && !GroupChat._nudging && Store.data.groupChat.lastRouteNudgeDay !== Utils.todayStr()) {
+      GroupChat._nudging = true;
+      GroupChat.maybeProactiveNudge().catch(() => {}).finally(() => { GroupChat._nudging = false; });
+    }
+
     // 首次进入播种欢迎语（只一次）
     if (!g.messages.length) this._seedGroupIntro(compName);
 
@@ -2371,8 +2388,13 @@ const Views = {
 
   _renderGroupBubble(m, ctx) {
     const time = Utils.formatTime(m.time);
+    // ① 每日日期分隔
+    if (m.type === 'date') {
+      return `<div class="grp-date-sep"><span>${Utils.escape(m.content)}</span></div>`;
+    }
     if (m.sender === 'user') {
-      return `<div class="grp-msg grp-user"><div class="grp-bubble grp-bubble-user">${Utils.escape(m.content).replace(/\n/g, '<br>')}</div><div class="grp-time">${time}</div></div>`;
+      const envTag = m.envState ? ` <span class="grp-env-tag">🌿 环境状态</span>` : '';
+      return `<div class="grp-msg grp-user"><div class="grp-bubble grp-bubble-user">${Utils.escape(m.content).replace(/\n/g, '<br>')}${envTag}</div><div class="grp-time">${time}</div></div>`;
     }
     if (m.isAction) {
       return `<div class="grp-action">${Utils.escape(m.content)}</div>`;
@@ -6348,7 +6370,9 @@ actions 是要执行的动作数组，可为空。每个动作格式：
   · 问候/寒暄：早上好、早、中午好、下午好、晚上好、晚安、你好、在吗、嗨
   · 情绪/撒娇/亲密表达：我好累、烦、无聊、想你、爱你、亲亲、抱抱、呜呜、emo、摸摸头
   · 纯闲聊/无明确行动：哈哈、哈哈哈、在的、摸摸
-  只有用户明确表达"要做某事 / 想做某个具体任务 / 提醒我 / 记一笔账"等行动意图时，才使用对应 action。用户只是打招呼或抒发情绪，给一句温柔的陪伴回复即可，不要展开任务监督、不要主动提议新任务。`;
+  只有用户明确表达"要做某事 / 想做某个具体任务 / 提醒我 / 记一笔账"等行动意图时，才使用对应 action。用户只是打招呼或抒发情绪，给一句温柔的陪伴回复即可，不要展开任务监督、不要主动提议新任务。
+
+${GroupChat.envContext ? GroupChat.envContext() : ''}`;
 
     return p;
   },
@@ -6679,6 +6703,24 @@ const App = {
       const elapsed = Date.now() - (Store.data.lastReminderTime || Date.now());
       if (elapsed >= Store.data.settings.reminderInterval * 60 * 1000) {
         Reminder.fire();
+      }
+    }, 60000);
+
+    // 每分钟检查日期分隔（跨零点自动标）+ 跨天重置每日推进标志
+    setInterval(() => {
+      const g = Store.data.groupChat;
+      if (g.lastRouteNudgeDay && g.lastRouteNudgeDay !== Utils.todayStr()) {
+        g.lastRouteNudgeDay = ''; // 新的一天，允许再次主动推进
+        Store.save();
+        if (Router.current === 'group') {
+          GroupChat.ensureDaySeparator();
+          if (AIClient.hasKey() && !GroupChat._nudging) {
+            GroupChat._nudging = true;
+            GroupChat.maybeProactiveNudge().catch(() => {}).finally(() => { GroupChat._nudging = false; });
+          }
+          const el = document.getElementById('main-content');
+          if (el) Views.group(el);
+        }
       }
     }, 60000);
 
@@ -7270,6 +7312,8 @@ actions 是要执行的动作数组，可为空。每个动作格式：
 - 记录活动：{"type":"activity","activityType":"study","desc":"学了英语1小时"}（activityType: wake,meal,work,rest,exercise,study,sleep,custom）
 - 记账：{"type":"expense","amount":25,"category":"餐饮","note":"午饭"} / {"type":"income","amount":5000,"category":"工资","note":""}
 - 跳过：{"type":"skip_task"} / 完成：{"type":"complete_task"} / 换任务：{"type":"switch_task"} / 退出执行：{"type":"exit_exec"}（后四个仅在用户正在执行某任务且明确表达意图时用）
+
+${GroupChat.envContext ? GroupChat.envContext() : ''}
 `;
     return p;
   },
@@ -7307,6 +7351,30 @@ actions 是要执行的动作数组，可为空。每个动作格式：
       throw err;
     }
   },
+
+  // 主动发言（不是回复用户）：只把助手回复写进上下文，不塞用户轮
+  async proactive(hint) {
+    if (!AIClient.hasKey()) return null;
+    const history = Store.data.guideChat.history;
+    const recent = history.slice(-20).map(m => ({ role: m.role, content: m.content }));
+    const system = this.buildSystemPrompt() + '\n\n你现在是主动发消息（不是回复用户），用你的口吻说一句简短的今日推进提醒/鼓励（1-3句，中文），不要重复任务列表。';
+    try {
+      const raw = await AIClient.callChat([...recent, { role: 'user', content: hint }], { system, temperature: 0.8, maxTokens: 400 });
+      let reply = raw;
+      try {
+        const m = raw.match(/```json\s*([\s\S]*?)```/) || raw.match(/```\s*([\s\S]*?)```/);
+        let jsonStr = m ? m[1] : raw;
+        const s = jsonStr.indexOf('{'), e = jsonStr.lastIndexOf('}');
+        if (s >= 0 && e > s) jsonStr = jsonStr.substring(s, e + 1);
+        const parsed = JSON.parse(jsonStr);
+        reply = parsed.reply || raw;
+      } catch (e) { reply = raw; }
+      history.push({ role: 'assistant', content: reply, time: new Date().toISOString() });
+      if (history.length > 200) history.splice(0, history.length - 200);
+      Store.save();
+      return reply;
+    } catch (e) { return null; }
+  },
 };
 
 /* ---------- 群聊编排器（用户 + 引导者 + 陪伴者） ---------- */
@@ -7343,9 +7411,56 @@ const GroupChat = {
     Store.save();
   },
 
+  /* ① 每日日期分隔：零点起自动标（引导者/系统标，不是用户标） */
+  ensureDaySeparator() {
+    const msgs = Store.data.groupChat.messages;
+    const today = Utils.todayStr();
+    const last = msgs[msgs.length - 1];
+    // 最后一条消息本身就发生在今天（分隔/气泡/提示都算）→ 今天已标过，不重复插入
+    if (last && (last.time || '').slice(0, 10) === today) return false;
+    msgs.push({ id: this._id(), type: 'date', content: Utils.dateLabel(today), time: new Date().toISOString() });
+    Store.save();
+    return true;
+  },
+
+  /* 环境/状态快照上下文（供两个 AI 引用，软标记，不绝对） */
+  envContext() {
+    const snaps = Store.data.groupChat.envSnapshots || [];
+    if (!snaps.length) return '';
+    const recent = snaps.slice(-5).map(s => '· ' + s.content).join('\n');
+    return '【用户近期描述的环境/状态（来自豆包识图文字，仅供参考，不要过度解读）】\n' + recent;
+  },
+
+  /* ② 引导者按每日线路主动推进提示（行为锚定：打开群聊时触发，不挂钟） */
+  async maybeProactiveNudge() {
+    if (!AIClient.hasKey()) return;
+    const today = Utils.todayStr();
+    if (Store.data.groupChat.lastRouteNudgeDay === today) return; // 每天一次
+    const route = (typeof Game !== 'undefined' && Game.ensureRoute) ? Game.ensureRoute() : null;
+    const items = (route && route.items) || [];
+    if (!items.length) return;
+    const pending = items.filter(i => !i.done && !i.skipped);
+    if (!pending.length) return;
+    const next = pending[0];
+    let anchor = '';
+    const def = (typeof DAILY_ROUTE !== 'undefined') ? DAILY_ROUTE.find(d => d.id === next.id) : null;
+    if (def && def.anchor) anchor = '（锚点：' + def.anchor + '）';
+    const hint = '今日每日线路还有 ' + pending.length + ' 项没做，下一步建议：' + next.name + anchor +
+      '。请用你的口吻说一句简短的今日推进提醒/鼓励（1-3 句，中文），不要重复任务列表，也不要当成用户在说话。';
+    Store.data.groupChat.lastRouteNudgeDay = today;
+    Store.save();
+    let reply = null;
+    try { reply = await Guide.proactive(hint); } catch (e) { reply = null; }
+    this.pushGuide(reply || ('🌅 早安～今天每日线路还有 ' + pending.length + ' 项没做，下一步建议：' + next.name + anchor + '。要现在开始哪一步？点 📷 描述下环境我也能帮你判断。'));
+    const el = document.getElementById('main-content');
+    if (el && Router.current === 'group') Views.group(el);
+  },
+
   triggerVision() {
     if (!AIClient.hasKey()) { Utils.toast('未连接 API，无法聊天', 'warning'); return; }
     this.pushGuide('📷 你现在可以描述一下你的或环境的状态（用豆包识图后，把文字描述发给我就行～）', true);
+    Store.data.groupChat.awaitingVisionReply = true;
+    Store.save();
     Utils.toast('引导者已发提示，去豆包识图后把文字发回来～');
     const el = document.getElementById('main-content');
     if (el && Router.current === 'group') Views.group(el);
@@ -7404,6 +7519,16 @@ const GroupChat = {
     else if (text.startsWith('@陪伴')) { forced = 'companion'; text = text.slice(3).trim(); }
 
     this.pushUser(text);
+
+    // ③ 识图描述回传：等待识图回复时，把下一条普通消息软标记为环境/状态快照（不绝对，仅参考）
+    if (Store.data.groupChat.awaitingVisionReply && !text.startsWith('@')) {
+      Store.data.groupChat.awaitingVisionReply = false;
+      const msgs = Store.data.groupChat.messages;
+      const lastMsg = msgs[msgs.length - 1];
+      if (lastMsg) lastMsg.envState = true;
+      Store.data.groupChat.envSnapshots.push({ id: this._id(), content: text, time: new Date().toISOString(), date: Utils.todayStr() });
+      Store.save();
+    }
 
     const guideResp = forced === 'companion' ? false : true; // 引导者默认每条都回；@陪伴者 时退场
     const compResp = forced ? (forced === 'companion') : this.isEmotional(text); // @引导者 时为 false
